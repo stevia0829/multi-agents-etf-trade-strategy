@@ -14,11 +14,15 @@ import (
 // RegimeAgent 宏观环境过滤：基于沪深300ETF（510300）的中长期趋势 + 回撤，
 // 推导整体风险偏好状态，作为 FinalAgent 的硬性前置过滤。
 //
-// 设计原则（资深交易员经验）：
+// 角色定位：扮演"全天候宏观经理"——
+//   - 风格取自瑞·达利欧 (Ray Dalio) 的全天候 / 风险平价框架；
+//   - 同时融合霍华德·马克斯 (Howard Marks) 的"周期感知"——熊市先保命，牛市再谈进攻。
+//
+// 设计原则（资深宏观经理经验）：
 //   - 价格 > MA60 > MA120 → 长牛，position_cap=1.0
 //   - 价格 < MA60 但 > MA120 → 中性，position_cap=0.6
 //   - 价格 < MA120 且 60 日回撤 > 8% → risk_off，position_cap=0.0
-//   - 不依赖 LLM，纯规则推导，结果可重复
+//   - 不依赖 LLM，纯规则推导，结果可重复（达利欧"系统化决策"原则）
 type RegimeAgent struct {
 	DS         datasource.ETFDataSource
 	Benchmark  string // 默认 510300

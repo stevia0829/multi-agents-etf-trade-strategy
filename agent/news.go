@@ -29,7 +29,15 @@ func NewNewsAgent(c llm.Client) *NewsAgent {
 	return &NewsAgent{LLM: c, Fetcher: datasource.NewNewsFetcher(), MaxItems: 8}
 }
 
-const newsSystemPrompt = `你是一名资深 A 股板块研究员。你拿到的每一条"真实新闻"都来自系统已抓取的最新公开资讯，禁止编造未列出的公司名称、数字、政策。
+const newsSystemPrompt = `你是一名拥有 15 年卖方经验的"首席行业研究员"，
+风格融合彼得·林奇（Peter Lynch）的"实地调研、用常识做生意"与
+查理·芒格（Charlie Munger）的"多元思维模型 / 反向思考"。
+你拿到的每一条"真实新闻"都来自系统已抓取的最新公开资讯，禁止编造未列出的公司名称、数字、政策。
+
+【你的研究纪律】
+- 林奇视角：把每一条新闻翻译成"这家板块在赚什么钱、谁在买单、订单是否真实"。
+- 芒格视角：始终问"如果我是反方，会怎么打这个故事的脸"，并在 risks 中体现。
+- 价值派纪律：对未经核实的传闻一律标注"待核实"，禁止给出确定性结论。
 
 工作流：
 1) 阅读"真实新闻列表"中所有标题与摘要；
@@ -70,14 +78,17 @@ func (a *NewsAgent) Run(ctx context.Context, etf types.ScoredETF) (*types.NewsAn
 		len(news), formatNewsList(news),
 	)
 
-	res := &types.NewsAnalysis{Sector: etf.ETF.Sector}
+	res := &types.NewsAnalysis{Sector: etf.ETF.Sector, ETFCode: etf.ETF.Code, ETFName: etf.ETF.Name}
 	err := callLLMJSON(ctx, a.LLM, newsSystemPrompt, user, res, func(raw string) {
 		if res.Summary == "" {
 			res.Summary = raw
 		}
 	})
 	if err != nil || res.Sentiment == "" {
-		return ruleBasedNewsFromItems(etf, news), nil
+		fb := ruleBasedNewsFromItems(etf, news)
+		fb.ETFCode = etf.ETF.Code
+		fb.ETFName = etf.ETF.Name
+		return fb, nil
 	}
 	if res.Score == 0 {
 		res.Score = mapSentimentScore(res.Sentiment)
@@ -85,7 +96,28 @@ func (a *NewsAgent) Run(ctx context.Context, etf types.ScoredETF) (*types.NewsAn
 	if res.Sector == "" {
 		res.Sector = etf.ETF.Sector
 	}
+	res.ETFCode = etf.ETF.Code
+	res.ETFName = etf.ETF.Name
 	return res, nil
+}
+
+// RunTop 批量分析 Top5（按 etfs 顺序返回 NewsAnalysis 切片）。
+// 单条失败不影响其他条；全部失败也会返回 nil 切片以外的兜底结果。
+func (a *NewsAgent) RunTop(ctx context.Context, etfs []types.ScoredETF) []types.NewsAnalysis {
+	out := make([]types.NewsAnalysis, 0, len(etfs))
+	for _, e := range etfs {
+		select {
+		case <-ctx.Done():
+			return out
+		default:
+		}
+		r, err := a.Run(ctx, e)
+		if err != nil || r == nil {
+			continue
+		}
+		out = append(out, *r)
+	}
+	return out
 }
 
 // buildNewsKeywords 多关键词扇出：板块名 / ETF 名（去掉"ETF"后缀）/ 核心概念别名。

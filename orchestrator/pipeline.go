@@ -21,6 +21,7 @@ type Pipeline struct {
 	Tech      *agent.TechnicalAgent
 	Regime    *agent.RegimeAgent
 	MoneyFlow *agent.MoneyFlowAgent
+	Memory    *agent.MemoryAgent
 	Final     *agent.FinalAgent
 	Logger    *log.Logger
 }
@@ -42,6 +43,7 @@ func NewPipeline(cfg *config.Config) (*Pipeline, error) {
 		Tech:      agent.NewTechnicalAgent(client),
 		Regime:    agent.NewRegimeAgent(ds),
 		MoneyFlow: agent.NewMoneyFlowAgent(ds),
+		Memory:    agent.NewMemoryAgent(client),
 		Final:     agent.NewFinalAgent(client),
 		Logger:    log.Default(),
 	}, nil
@@ -70,17 +72,26 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 	target := scr.Best
 	p.Logger.Printf("[pipeline] step1 done. best=%s(%s) score=%.2f", target.ETF.Name, target.ETF.Code, target.Score)
 
-	p.Logger.Println("[pipeline] step2: news / global / technical / regime / moneyflow fan-out…")
+	p.Logger.Println("[pipeline] step2: news / global / technical / regime / moneyflow / memory fan-out…")
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 
 	go func() {
 		defer wg.Done()
-		n, e := p.News.Run(ctx, target)
-		if e != nil {
-			p.Logger.Printf("[news] error: %v", e)
+		// 对 Top5 批量做新闻面分析；Top1 也写入 state.News 以兼容报告渲染。
+		list := p.News.RunTop(ctx, scr.Top5)
+		state.NewsList = list
+		for i := range list {
+			if list[i].ETFCode == target.ETF.Code {
+				cp := list[i]
+				state.News = &cp
+				break
+			}
 		}
-		state.News = n
+		if state.News == nil && len(list) > 0 {
+			cp := list[0]
+			state.News = &cp
+		}
 	}()
 	go func() {
 		defer wg.Done()
@@ -101,11 +112,20 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		t, e := p.Tech.Run(ctx, target)
-		if e != nil {
-			p.Logger.Printf("[tech] error: %v", e)
+		// 对 Top5 批量做技术面分析；Top1 同步到 state.Tech 用于兼容报告。
+		list := p.Tech.RunTop(ctx, scr.Top5)
+		state.TechList = list
+		for i := range list {
+			if list[i].ETFCode == target.ETF.Code {
+				cp := list[i]
+				state.Tech = &cp
+				break
+			}
 		}
-		state.Tech = t
+		if state.Tech == nil && len(list) > 0 {
+			cp := list[0]
+			state.Tech = &cp
+		}
 	}()
 	go func() {
 		defer wg.Done()
@@ -125,6 +145,15 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 			p.Logger.Printf("[moneyflow] error: %v", e)
 		}
 		state.MoneyFlow = m
+	}()
+	go func() {
+		defer wg.Done()
+		// 长期记忆：默认读 report 目录最近 5 份历史报告，由 LLM 综合输出。
+		mem, e := p.Memory.Run(ctx)
+		if e != nil {
+			p.Logger.Printf("[memory] error: %v", e)
+		}
+		state.Memory = mem
 	}()
 	wg.Wait()
 	p.Logger.Println("[pipeline] step2 done.")
