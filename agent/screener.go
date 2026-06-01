@@ -107,6 +107,11 @@ func (a *ScreenerAgent) Run(ctx context.Context) (*types.ScreenerResult, error) 
 		})
 	}
 
+	// 同板块去重：每个 sector 仅保留分数最高的一只，避免 Top5 在同一风险因子上双倍下注。
+	// scored 已按 RotationAgent 输出的顺序（动量分由高到低）排列，这里只需顺序遍历挑出
+	// 各 sector 第一次出现的标的即可保证留下的是该 sector 的最高分。
+	scored = dedupBySector(scored)
+
 	top := scored
 	if a.TopN > 0 && len(top) > a.TopN {
 		top = top[:a.TopN]
@@ -165,6 +170,27 @@ func normalizeStrategy3Score(score, r2 float64) float64 {
 		v = 100
 	}
 	return v
+}
+
+// dedupBySector 在保持原有顺序（按分数从高到低）的前提下，对同一 sector 仅保留首个出现的标的。
+// 没有 sector 字段的标的（Sector 为空）视为独立类别，全部保留。
+func dedupBySector(in []types.ScoredETF) []types.ScoredETF {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]types.ScoredETF, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, s := range in {
+		sector := s.ETF.Sector
+		if sector != "" {
+			if _, ok := seen[sector]; ok {
+				continue
+			}
+			seen[sector] = struct{}{}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 func buildRotationReason(c RotationCandidate, action RotationAction) string {

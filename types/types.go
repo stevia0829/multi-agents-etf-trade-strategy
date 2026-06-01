@@ -49,10 +49,6 @@ type ScreenerResult struct {
 }
 
 type NewsAnalysis struct {
-	// ETFCode 当 NewsAnalysis 是 Top5 批量分析中的某一条时，标识对应的 ETF；
-	// 单标的模式（向后兼容）下可为空。
-	ETFCode   string   `json:"etf_code,omitempty"`
-	ETFName   string   `json:"etf_name,omitempty"`
 	Sector    string   `json:"sector"`
 	Sentiment string   `json:"sentiment"`
 	Score     float64  `json:"score"`
@@ -104,22 +100,6 @@ type FinalDecision struct {
 	GeneratedAt    time.Time            `json:"generated_at"`
 	// 加权分数明细
 	ScoreBreakdown map[string]float64 `json:"score_breakdown"`
-	// Picks 是 FinalAgent 从 Top5 中挑选出的 1-2 支最值得买入的标的（含 Top1）。
-	// 报告侧据此渲染"投委会精选"小节。
-	Picks []FinalPick `json:"picks,omitempty"`
-}
-
-// FinalPick FinalAgent 从 Top5 中挑出的精选标的（1-2 支）。
-type FinalPick struct {
-	ETFCode        string  `json:"etf_code"`
-	ETFName        string  `json:"etf_name"`
-	Sector         string  `json:"sector"`
-	Recommendation string  `json:"recommendation"` // strong_buy / buy / hold
-	Conviction     float64 `json:"conviction"`     // 0-100，投委会信心度
-	EntryPrice     float64 `json:"entry_price"`
-	StopLoss       float64 `json:"stop_loss"`
-	TakeProfit     float64 `json:"take_profit"`
-	Rationale      string  `json:"rationale"` // 一段 60~120 字的"为什么是它而不是其他 4 支"
 }
 
 type AgentState struct {
@@ -130,14 +110,6 @@ type AgentState struct {
 	Regime    *RegimeAnalysis       `json:"regime,omitempty"`
 	MoneyFlow *MoneyFlowAnalysis    `json:"money_flow,omitempty"`
 	Final     *FinalDecision        `json:"final,omitempty"`
-	// NewsList / TechList 是 Top5 批量分析结果（按 Top5 顺序对齐）。
-	// 由 pipeline 填充；FinalAgent 用其在 Top5 中挑选 1-2 支最佳标的。
-	// 与 News / Tech 字段并存：单标的字段仍保留 Top1，便于报告侧向后兼容。
-	NewsList []NewsAnalysis      `json:"news_list,omitempty"`
-	TechList []TechnicalAnalysis `json:"tech_list,omitempty"`
-	// Memory 由 MemoryAgent 在 final 之前填充，封装最近若干份历史报告
-	// 压缩后的"长期记忆备忘"，FinalAgent 直接消费，不再自己读文件。
-	Memory *MemorySummary `json:"memory,omitempty"`
 	// CurrentHold 用户当前持仓 ETF 代码，可选；为空时报告中跳过"持仓对照"章节。
 	// 仅本次会话使用，系统不做任何本地持久化。
 	CurrentHold string `json:"current_hold,omitempty"`
@@ -182,23 +154,4 @@ type HoldAdvice struct {
 	BestCode    string `json:"best_code"`   // Top1 代码（轮动目标）
 	BestName    string `json:"best_name"`   // Top1 名称
 	Suggestion  string `json:"suggestion"`  // 一句话建议
-}
-
-// HistoryMemo 单份历史报告压缩后的纪要。由 MemoryAgent 解析。
-type HistoryMemo struct {
-	Date           string  `json:"date"`            // YYYY-MM-DD
-	TargetName     string  `json:"target_name"`     // 目标 ETF 名称
-	TargetCode     string  `json:"target_code"`     // 目标 ETF 代码
-	Sector         string  `json:"sector"`          // 板块
-	OverallScore   float64 `json:"overall_score"`   // 综合评分
-	Recommendation string  `json:"recommendation"`  // 建议
-	ReasoningGist  string  `json:"reasoning_gist"`  // Reasoning 压缩后的一句话
-}
-
-// MemorySummary 是 MemoryAgent 输出的"长期记忆备忘"，注入 FinalAgent 用于发现跨日 pattern。
-type MemorySummary struct {
-	Summary  string        `json:"summary"`            // <=200 字综述
-	Patterns []string      `json:"patterns,omitempty"` // 关键 pattern（连续追高 / 板块切换 等）
-	Warnings []string      `json:"warnings,omitempty"` // 给今日 CIO 的注意事项
-	Memos    []HistoryMemo `json:"memos,omitempty"`    // 原始压缩纪要（供 FinalAgent 引用细节）
 }

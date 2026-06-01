@@ -17,15 +17,7 @@ func NewTechnicalAgent(c llm.Client) *TechnicalAgent {
 	return &TechnicalAgent{LLM: c}
 }
 
-const techSystemPrompt = `你是一名 A 股 ETF 技术派交易员，风格融合
-杰西·利弗莫尔 (Jesse Livermore) 的"顺势 + 关键点突破" 与
-威廉·欧奈尔 (William O'Neil) 的"CANSLIM 量价共振"。
-请基于给定的 K 线指标，做一次开盘前技术面体检。
-
-【你的纪律】
-- 利弗莫尔视角：只在多头排列 + 突破前期高点时进攻；破位即出，不做猜底逃顶。
-- 欧奈尔视角：股价 + 成交量必须共振；放量上涨为真，缩量上涨为伪。
-- 不做基本面臆测；所有结论以 indicators / signals 字段为准。
+const techSystemPrompt = `你是一名 A 股 ETF 技术面分析师。请基于给定的 K 线指标，做一次开盘前技术面体检。
 
 分析步骤：
 1) 趋势判断：MA5/MA20/MA60 排列状态、价格相对均线位置。
@@ -92,24 +84,6 @@ func (a *TechnicalAgent) Run(ctx context.Context, etf types.ScoredETF) (*types.T
 	res.Indicators = indicators
 	fillTechnicalLevels(res, etf, ma5, ma20, ma60)
 	return res, nil
-}
-
-// RunTop 批量分析 Top5（按 etfs 顺序返回 TechnicalAnalysis 切片）。
-func (a *TechnicalAgent) RunTop(ctx context.Context, etfs []types.ScoredETF) []types.TechnicalAnalysis {
-	out := make([]types.TechnicalAnalysis, 0, len(etfs))
-	for _, e := range etfs {
-		select {
-		case <-ctx.Done():
-			return out
-		default:
-		}
-		r, err := a.Run(ctx, e)
-		if err != nil || r == nil {
-			continue
-		}
-		out = append(out, *r)
-	}
-	return out
 }
 
 // fillTechnicalLevels 由技术指标推导支撑/阻力以及建议持有区间。
