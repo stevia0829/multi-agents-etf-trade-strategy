@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,11 @@ func (w *Writer) Save(state *types.AgentState) (string, error) {
 	content := BuildMarkdown(state, now)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	// 同步落 JSON sidecar，供下游 9:24 PreOpenAgent 直接 Unmarshal 使用。
+	jsonPath := filepath.Join(w.Dir, fmt.Sprintf("etf-report-%s.json", now.Format("20060102-150405")))
+	if buf, err := json.MarshalIndent(state, "", "  "); err == nil {
+		_ = os.WriteFile(jsonPath, buf, 0o644)
 	}
 	abs, _ := filepath.Abs(path)
 	return abs, nil

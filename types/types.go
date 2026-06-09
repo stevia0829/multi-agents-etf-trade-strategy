@@ -185,6 +185,35 @@ type MoneyFlowAnalysis struct {
 	Summary         string  `json:"summary"`
 }
 
+// PreOpenSnapshot 单只标的在 9:24 集合竞价时刻的快照与复核结论。
+type PreOpenSnapshot struct {
+	ETFCode      string  `json:"etf_code"`
+	ETFName      string  `json:"etf_name"`
+	PrevClose    float64 `json:"prev_close"`
+	AuctionPrice float64 `json:"auction_price"` // 虚拟开盘价（撮合价）
+	IOPV         float64 `json:"iopv"`
+	PremiumPct   float64 `json:"premium_pct"` // (auction-iopv)/iopv
+	GapPct       float64 `json:"gap_pct"`     // (auction-prevClose)/prevClose
+	EntryPrice   float64 `json:"entry_price"` // 来自 8:50 报告
+	EntryGapPct  float64 `json:"entry_gap_pct"`
+	Verdict      string  `json:"verdict"` // chase / wait_pullback / abandon / on_target
+	AdjEntry     float64 `json:"adj_entry"`
+	AdjStopLoss  float64 `json:"adj_stop_loss"`
+	AdjTakeProf  float64 `json:"adj_take_profit"`
+	Note         string  `json:"note"`
+}
+
+// PreOpenAnalysis 9:24 PreOpenAgent 综合输出。
+type PreOpenAnalysis struct {
+	BaseReportPath string            `json:"base_report_path"`
+	GeneratedAt    time.Time         `json:"generated_at"`
+	Market         PreOpenSnapshot   `json:"market"`      // 510300 大盘
+	MarketBias     string            `json:"market_bias"` // strong_up / weak_up / flat / weak_down / strong_down
+	Snapshots      []PreOpenSnapshot `json:"snapshots"`   // Final + Picks 合并去重
+	Summary        string            `json:"summary"`
+	FinalAction    string            `json:"final_action"`
+}
+
 // HoldAdvice 持仓对照建议（无状态推导）。
 type HoldAdvice struct {
 	CurrentHold string `json:"current_hold"`
