@@ -217,7 +217,7 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 	}
 
 	switch variant {
-	case "v3", "v3v2", "joinquant":
+	case "v3", "v3v2", "joinquant", "v3p1":
 		res := runOne(variant)
 		filename := fmt.Sprintf("backtest-%s-%s.md", variant, time.Now().Format("20060102-150405"))
 		path := filepath.Join(reportDir, filename)
@@ -239,8 +239,20 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 		}
 		abs, _ := filepath.Abs(path)
 		fmt.Println("📄 V3 vs V3+V2 对比回测报告已生成:", abs)
+	case "both_p1":
+		resV3 := runOne("v3")
+		resV3P1 := runOne("v3p1")
+		filename := fmt.Sprintf("backtest-compare-p1-%s.md", time.Now().Format("20060102-150405"))
+		path := filepath.Join(reportDir, filename)
+		md := backtest.BuildP1CompareMarkdown(resV3, resV3P1)
+		if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
+			fmt.Println("write p1 compare report error:", err)
+			return
+		}
+		abs, _ := filepath.Abs(path)
+		fmt.Println("📄 P0 vs P1 对比回测报告已生成:", abs)
 	default:
-		fmt.Printf("invalid --bt-variant: %s (expect v3/v3v2/both/joinquant)\n", variant)
+		fmt.Printf("invalid --bt-variant: %s (expect v3/v3v2/v3p1/both/both_p1/joinquant)\n", variant)
 		os.Exit(2)
 	}
 	_ = agent.NewScreenerAgent

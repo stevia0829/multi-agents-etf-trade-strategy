@@ -152,6 +152,21 @@ func NewEngine(ds datasource.ETFDataSource) *Engine {
 func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Result, error) {
 	_ = step // 保留参数兼容，状态化每日回测忽略 step
 
+	// Variant 注入：v3p1 在 v3 主流程之上启用 P1-1（双周期动量）+ P1-2（凸性调整）
+	if e.Variant == "v3p1" && e.Screener != nil && e.Screener.Rotation != nil {
+		p := e.Screener.Rotation.Params
+		p.EnableDualMomentum = true
+		p.LongLookback = 252
+		p.LongMinAnnualized = 0.0
+		p.EnableConvexity = true
+		p.ConvexityLookback = 21
+		p.ConvexitySigmaFloor = 0.05
+		// 凸性调整后 score 量纲被 σ 放大（约 5~20 倍），原 MaxScore=6 过热门槛失效；
+		// 放宽到 30，仍保留 1.1 倍日间增长的过热判定语义。
+		p.MaxScore = 30
+		e.Screener.Rotation.Params = p
+	}
+
 	// 用基准 ETF（510300）的历史 K 线来确定有效交易日序列
 	baseKlines, err := e.DS.GetKLineAsOf("510300", 1500, end)
 	if err != nil || len(baseKlines) == 0 {
@@ -964,4 +979,110 @@ func deriveCompareConclusion(v3, v3v2 *Result) string {
 		b.WriteString("- 综合判断：两者表现接近，需要扩大样本/区间再做结论。\n")
 	}
 	return b.String()
+}
+
+// BuildP1CompareMarkdown 渲染 P0(v3) vs P0+P1(v3p1) 的 A/B 对比报告。
+func BuildP1CompareMarkdown(v3, v3p1 *Result) string {
+	var b strings.Builder
+	b.WriteString("# P0 vs P0+P1 对比回测：双周期动量 + 凸性调整\n\n")
+	b.WriteString(fmt.Sprintf("- 回测区间: `%s` ~ `%s`\n", v3.StartDate.Format("2006-01-02"), v3.EndDate.Format("2006-01-02")))
+	b.WriteString(fmt.Sprintf("- 持有期: **%d** 个交易日\n", v3.HoldDays))
+	b.WriteString(fmt.Sprintf("- 单边成本: %.4f；基准: `%s` (buy & hold %+.2f%%)\n",
+		v3.CostPerSide, defaultStr(v3.BenchmarkCode, "510300"), v3.BenchmarkReturn*100))
+	b.WriteString("- P1 改造：① 252 日年化 ≥ 0 的双周期动量过滤（Antonacci 2014）；② 凸性调整 score := score / max(σ_21, 0.05)（Daniel & Moskowitz 2016）\n\n")
+
+	b.WriteString("## 一、整体对比\n\n")
+	b.WriteString("| 指标 | P0（v3） | P0+P1（v3p1） | Δ |\n|---|---|---|---|\n")
+	row := func(label string, av, bv float64, fmtPct bool) {
+		var sa, sb, sd string
+		if fmtPct {
+			sa = fmt.Sprintf("%.2f%%", av*100)
+			sb = fmt.Sprintf("%.2f%%", bv*100)
+			sd = fmt.Sprintf("%+.2f pp", (bv-av)*100)
+		} else {
+			sa = fmtFinite(av)
+			sb = fmtFinite(bv)
+			sd = fmt.Sprintf("%+.2f", bv-av)
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", label, sa, sb, sd))
+	}
+	rowInt := func(label string, av, bv int) {
+		b.WriteString(fmt.Sprintf("| %s | %d | %d | %+d |\n", label, av, bv, bv-av))
+	}
+	rowInt("样本数", v3.Total, v3p1.Total)
+	rowInt("实际建仓数", v3.Wins+v3.Losses, v3p1.Wins+v3p1.Losses)
+	rowInt("胜次", v3.Wins, v3p1.Wins)
+	rowInt("败次", v3.Losses, v3p1.Losses)
+	row("胜率", v3.WinRate, v3p1.WinRate, true)
+	row("平均加权收益", v3.AvgReturn, v3p1.AvgReturn, true)
+	row("最大单笔收益", v3.MaxReturn, v3p1.MaxReturn, true)
+	row("最大单笔亏损", v3.MinReturn, v3p1.MinReturn, true)
+	row("收益标准差", v3.StdReturn, v3p1.StdReturn, true)
+	row("简易 Sharpe", v3.Sharpe, v3p1.Sharpe, false)
+	row("累计净收益", v3.TotalReturn, v3p1.TotalReturn, true)
+	row("年化收益", v3.AnnualReturn, v3p1.AnnualReturn, true)
+	row("最大回撤", v3.MaxDrawdown, v3p1.MaxDrawdown, true)
+	row("Calmar", v3.Calmar, v3p1.Calmar, false)
+	row("Sortino", v3.Sortino, v3p1.Sortino, false)
+	row("Profit Factor", v3.ProfitFactor, v3p1.ProfitFactor, false)
+	row("盈亏比", v3.WinLossRatio, v3p1.WinLossRatio, false)
+	row("Alpha vs 基准", v3.Alpha, v3p1.Alpha, true)
+
+	b.WriteString("\n## 二、按 Recommendation 分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.ByReco, v3p1.ByReco, "P0", "P0+P1")
+	b.WriteString("\n## 三、按宏观环境分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.ByRegime, v3p1.ByRegime, "P0", "P0+P1")
+	b.WriteString("\n## 四、按板块分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.BySector, v3p1.BySector, "P0", "P0+P1")
+
+	b.WriteString("\n## 五、P0 近 20 笔交易明细\n\n")
+	writeTradeTail(&b, v3.Trades, 20)
+	b.WriteString("\n## 六、P0+P1 近 20 笔交易明细\n\n")
+	writeTradeTail(&b, v3p1.Trades, 20)
+
+	b.WriteString("\n## 七、结论速览\n\n")
+	dRet := (v3p1.TotalReturn - v3.TotalReturn) * 100
+	dMDD := (v3p1.MaxDrawdown - v3.MaxDrawdown) * 100
+	dAlpha := (v3p1.Alpha - v3.Alpha) * 100
+	dCalmar := v3p1.Calmar - v3.Calmar
+	b.WriteString(fmt.Sprintf("- 累计净收益变化：%+.2f pp（P0 %+.2f%% → P0+P1 %+.2f%%）\n", dRet, v3.TotalReturn*100, v3p1.TotalReturn*100))
+	b.WriteString(fmt.Sprintf("- 最大回撤变化：%+.2f pp（P0 %.2f%% → P0+P1 %.2f%%）\n", dMDD, v3.MaxDrawdown*100, v3p1.MaxDrawdown*100))
+	b.WriteString(fmt.Sprintf("- Calmar 变化：%+.2f（P0 %s → P0+P1 %s）\n", dCalmar, fmtFinite(v3.Calmar), fmtFinite(v3p1.Calmar)))
+	b.WriteString(fmt.Sprintf("- Alpha 变化：%+.2f pp（P0 %+.2f%% → P0+P1 %+.2f%%）\n", dAlpha, v3.Alpha*100, v3p1.Alpha*100))
+	switch {
+	case dRet > 0 && dMDD <= 0:
+		b.WriteString("- 综合判断：P1 双动量 + 凸性调整 同时改善收益与回撤，建议合入主流程默认开启。\n")
+	case dRet > 0 && dMDD > 0:
+		b.WriteString("- 综合判断：P1 提升收益但回撤略放大，建议保留为可选开关。\n")
+	case dRet <= 0 && dMDD < 0:
+		b.WriteString("- 综合判断：P1 牺牲一定收益换取回撤控制，适合熊市/高波动期启用。\n")
+	default:
+		b.WriteString("- 综合判断：P1 在该区间未带来明显改善，需要扩大样本/区间再做结论。\n")
+	}
+	return b.String()
+}
+
+// writeBucketCompareLabeled 与 writeBucketCompare 同语义，但表头使用自定义 label。
+func writeBucketCompareLabeled(b *strings.Builder, av, bv map[string]Bucket, labelA, labelB string) {
+	keys := map[string]bool{}
+	for k := range av {
+		keys[k] = true
+	}
+	for k := range bv {
+		keys[k] = true
+	}
+	ordered := make([]string, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Strings(ordered)
+	b.WriteString(fmt.Sprintf("| 分类 | %s 样本 | %s 胜率 | %s 平均收益 | %s 样本 | %s 胜率 | %s 平均收益 |\n",
+		labelA, labelA, labelA, labelB, labelB, labelB))
+	b.WriteString("|---|---|---|---|---|---|---|\n")
+	for _, k := range ordered {
+		x := av[k]
+		y := bv[k]
+		b.WriteString(fmt.Sprintf("| %s | %d | %.2f%% | %+.2f%% | %d | %.2f%% | %+.2f%% |\n",
+			k, x.Count, x.WinRate*100, x.AvgRet*100, y.Count, y.WinRate*100, y.AvgRet*100))
+	}
 }

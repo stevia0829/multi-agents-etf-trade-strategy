@@ -109,6 +109,17 @@ type RotationParams struct {
 	MinScore                 float64 // 动量过滤下限 (g.min_score, default 0)
 	ScoreThresholdMultiplier float64 // 高分情形下日间增长阈值 (g.score_threshold_multiplier, default 1.1)
 	TopN                     int     // 返回前 N 名
+
+	// ── P1 学术增强（可选；默认全关，保持 P0 行为不变） ──────────────
+	// EnableDualMomentum 启用双周期动量（Antonacci 2014）：要求 LongLookback 日年化 >= LongMinAnnualized。
+	EnableDualMomentum bool
+	LongLookback       int     // 默认 252（约 1 年）
+	LongMinAnnualized  float64 // 默认 0.0（即"跑赢无风险≈0%"的简化版）
+
+	// EnableConvexity 启用凸性调整（Daniel & Moskowitz 2016）：score := score / max(σ_n, floor)。
+	EnableConvexity     bool
+	ConvexityLookback   int     // 默认 21
+	ConvexitySigmaFloor float64 // 防 0 除/小波动放大，默认 0.05（年化 5%）
 }
 
 func DefaultRotationParams() RotationParams {
@@ -118,6 +129,14 @@ func DefaultRotationParams() RotationParams {
 		MinScore:                 0, // 对齐聚宽 g.min_score=0：负分动量直接出局
 		ScoreThresholdMultiplier: 1.1,
 		TopN:                     5,
+
+		// P1 默认全关：保持 P0 主流程行为，由调用方/回测变体显式启用
+		EnableDualMomentum:  false,
+		LongLookback:        252,
+		LongMinAnnualized:   0.0,
+		EnableConvexity:     false,
+		ConvexityLookback:   21,
+		ConvexitySigmaFloor: 0.05,
 	}
 }
 
@@ -265,14 +284,21 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 	candidates := make([]RotationCandidate, 0, len(Strategy3Pool))
 	hasOverMax := false
 
+	// 数据需求：默认 m+1；若开启双动量需要 LongLookback+1
+	need := p.MDays + 1
+	if p.EnableDualMomentum && p.LongLookback+1 > need {
+		need = p.LongLookback + 1
+	}
+	if p.EnableConvexity && p.ConvexityLookback+2 > need {
+		need = p.ConvexityLookback + 2
+	}
+
 	for _, e := range Strategy3Pool {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
-		// 拉取 m_days+1 长度，便于一次性算 T 日和 T-1 日 score
-		need := p.MDays + 1
 		klines, err := a.DS.GetKLineAsOf(e.Code, need, a.AsOf)
 		if err != nil || len(klines) < p.MDays {
 			continue
@@ -287,6 +313,46 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 		if len(klines) > p.MDays {
 			prev, _, _ = indicator.MomentumScore(klines[:len(klines)-1], p.MDays)
 			hasPrev = true
+		}
+
+		// ── P1-1 双周期动量过滤（Antonacci 2014）─────────────────────
+		// 252 日年化 < 阈值 → 视为长期下跌趋势，直接出局
+		if p.EnableDualMomentum {
+			lb := p.LongLookback
+			if lb <= 0 {
+				lb = 252
+			}
+			if len(klines) >= lb {
+				longAnn := indicator.AnnualizedReturnN(klines, lb)
+				if longAnn < p.LongMinAnnualized {
+					continue
+				}
+			}
+		}
+
+		// ── P1-2 凸性调整（Daniel & Moskowitz 2016）──────────────────
+		// score := score / max(σ_n, floor)；T 与 T-1 都做，保证 1.1 倍门槛口径一致
+		if p.EnableConvexity {
+			lb := p.ConvexityLookback
+			if lb <= 0 {
+				lb = 21
+			}
+			floor := p.ConvexitySigmaFloor
+			if floor <= 0 {
+				floor = 0.05
+			}
+			sig := indicator.VolatilityN(klines, lb)
+			if sig < floor {
+				sig = floor
+			}
+			score /= sig
+			if hasPrev && len(klines) > 1 {
+				sigPrev := indicator.VolatilityN(klines[:len(klines)-1], lb)
+				if sigPrev < floor {
+					sigPrev = floor
+				}
+				prev /= sigPrev
+			}
 		}
 
 		etf := types.ETF{

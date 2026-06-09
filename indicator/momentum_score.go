@@ -96,3 +96,60 @@ func MomentumScore(klines []types.KLine, mDays int) (score, annualized, r2 float
 	score = annualized * r2
 	return score, annualized, r2
 }
+
+// AnnualizedReturnN 计算最近 n 个交易日的年化收益率（用于双动量绝对趋势过滤，
+// 对应 Antonacci 2014 的 12-month absolute momentum）。
+//
+//	annualized = (close_T / close_{T-n+1})^(250/n) - 1
+//
+// 样本不足或价格异常时返回 0（让上层过滤逻辑视为 fail-open，可配合 EnableDualMomentum
+// 开关决定是否剔除）。
+func AnnualizedReturnN(klines []types.KLine, n int) float64 {
+	if n <= 1 || len(klines) < n {
+		return 0
+	}
+	first := klines[len(klines)-n].Close
+	last := klines[len(klines)-1].Close
+	if first <= 0 || last <= 0 {
+		return 0
+	}
+	totalRet := last/first - 1
+	years := float64(n) / 250.0
+	if years <= 0 {
+		return 0
+	}
+	return math.Pow(1+totalRet, 1.0/years) - 1
+}
+
+// VolatilityN 计算最近 n 个交易日的年化波动率（log-return 标准差 × √250）。
+// 用于 Daniel & Moskowitz 2016 的 convexity 调整：score / σ_n。
+// 样本不足或退化时返回 0。
+func VolatilityN(klines []types.KLine, n int) float64 {
+	if n <= 1 || len(klines) < n+1 {
+		return 0
+	}
+	rets := make([]float64, 0, n)
+	tail := klines[len(klines)-n-1:]
+	for i := 1; i < len(tail); i++ {
+		p0 := tail[i-1].Close
+		p1 := tail[i].Close
+		if p0 <= 0 || p1 <= 0 {
+			return 0
+		}
+		rets = append(rets, math.Log(p1/p0))
+	}
+	if len(rets) < 2 {
+		return 0
+	}
+	var mean float64
+	for _, r := range rets {
+		mean += r
+	}
+	mean /= float64(len(rets))
+	var sse float64
+	for _, r := range rets {
+		sse += (r - mean) * (r - mean)
+	}
+	std := math.Sqrt(sse / float64(len(rets)-1))
+	return std * math.Sqrt(250)
+}
