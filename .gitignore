@@ -12,6 +12,7 @@ dist/
 config/secrets.json
 
 report/etf-report-*.md
+report/preopen-report-*.md
 report/backtest-*.md
 report/backtest-compare-*.md
 report/state-*.json
