@@ -120,6 +120,18 @@ type RotationParams struct {
 	EnableConvexity     bool
 	ConvexityLookback   int     // 默认 21
 	ConvexitySigmaFloor float64 // 防 0 除/小波动放大，默认 0.05（年化 5%）
+
+	// ── P1 风控旁路（Regime-aware） ──────────────────────────────────
+	// RegimeAwareP1 启用后，仅在 RegimeTrend ∈ {bear, risk_off} 时
+	// 真正生效 P1-1 双动量过滤 + P1-2 凸性调整；
+	// bull/neutral_up/neutral 时跳过，让趋势市的高 σ 赢家裸奔。
+	// 设计依据：P1-2 在温和单边市与"动量加速"机制冲突（短样本 -19 pp），
+	// 但其论文设计目的是防"动量崩盘"，弱市才是它该工作的场景。
+	RegimeAwareP1 bool
+	// RegimeTrend 由调用方（回测引擎 / 实盘 pipeline）在 Rank 之前注入，
+	// 取值与 classifyRegime 一致：bull / neutral_up / neutral / bear / risk_off。
+	// 空字符串视为"未知"，按"启用 P1"保守处理（避免漏过崩盘期）。
+	RegimeTrend string
 }
 
 func DefaultRotationParams() RotationParams {
@@ -137,6 +149,11 @@ func DefaultRotationParams() RotationParams {
 		EnableConvexity:     false,
 		ConvexityLookback:   21,
 		ConvexitySigmaFloor: 0.05,
+
+		// 默认开启 Regime-aware：P1 仅在 bear/risk_off 时生效；
+		// 调用方若关闭此开关，则恢复"全局启用 P1"的旧行为（与首版 v3p1 相同）。
+		RegimeAwareP1: true,
+		RegimeTrend:   "",
 	}
 }
 
@@ -284,12 +301,37 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 	candidates := make([]RotationCandidate, 0, len(Strategy3Pool))
 	hasOverMax := false
 
+	// ── P1 Regime-aware 闸门 ────────────────────────────────────────
+	// 只有在 RegimeAwareP1=true 且当前 trend ∈ {bear, risk_off, ""(未知)} 时，
+	// 才真正应用 P1-1 双动量过滤 + P1-2 凸性调整；
+	// trend 已知是 bull/neutral_up/neutral 时跳过，让趋势市的高 σ 赢家裸奔。
+	p1Active := !p.RegimeAwareP1 // 关闭闸门时恢复"全局启用"
+	if p.RegimeAwareP1 {
+		switch p.RegimeTrend {
+		case "bear", "risk_off", "":
+			p1Active = true
+		default:
+			p1Active = false
+		}
+	}
+	useDualMomentum := p.EnableDualMomentum && p1Active
+	useConvexity := p.EnableConvexity && p1Active
+
+	// 过热门槛 MaxScore 与 useConvexity 联动：
+	//   - useConvexity=true 时 score 量纲被 σ 放大约 5~20 倍，必须放宽 MaxScore（否则全员"过热"卡死）；
+	//   - useConvexity=false 时回到原 P0 量纲（典型 score ∈ [0, 8]），保留 MaxScore=6 的过热判定。
+	// 这样 v3p1 在 bull/neutral 时与 v3 完全等价，避免 v3p1 短样本被无差别放宽 MaxScore 拖累。
+	maxScore := p.MaxScore
+	if useConvexity && maxScore < 30 {
+		maxScore = 30
+	}
+
 	// 数据需求：默认 m+1；若开启双动量需要 LongLookback+1
 	need := p.MDays + 1
-	if p.EnableDualMomentum && p.LongLookback+1 > need {
+	if useDualMomentum && p.LongLookback+1 > need {
 		need = p.LongLookback + 1
 	}
-	if p.EnableConvexity && p.ConvexityLookback+2 > need {
+	if useConvexity && p.ConvexityLookback+2 > need {
 		need = p.ConvexityLookback + 2
 	}
 
@@ -317,7 +359,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 
 		// ── P1-1 双周期动量过滤（Antonacci 2014）─────────────────────
 		// 252 日年化 < 阈值 → 视为长期下跌趋势，直接出局
-		if p.EnableDualMomentum {
+		if useDualMomentum {
 			lb := p.LongLookback
 			if lb <= 0 {
 				lb = 252
@@ -332,7 +374,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 
 		// ── P1-2 凸性调整（Daniel & Moskowitz 2016）──────────────────
 		// score := score / max(σ_n, floor)；T 与 T-1 都做，保证 1.1 倍门槛口径一致
-		if p.EnableConvexity {
+		if useConvexity {
 			lb := p.ConvexityLookback
 			if lb <= 0 {
 				lb = 21
@@ -370,7 +412,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 			HasPrev:    hasPrev,
 			Klines:     klines,
 		}
-		if score > p.MaxScore {
+		if score > maxScore {
 			hasOverMax = true
 		}
 		candidates = append(candidates, c)
@@ -391,7 +433,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 	if hasOverMax && p.ScoreThresholdMultiplier > 0 {
 		again := filtered[:0]
 		for _, c := range filtered {
-			if c.Score > p.MaxScore {
+			if c.Score > maxScore {
 				if c.HasPrev && c.PrevScore > 0 && c.Score >= c.PrevScore*p.ScoreThresholdMultiplier {
 					again = append(again, c)
 				}

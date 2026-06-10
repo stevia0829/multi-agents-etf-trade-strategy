@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/eino-multi-etf-strategy/datasource"
@@ -140,6 +141,13 @@ func (a *ScreenerAgent) Run(ctx context.Context) (*types.ScreenerResult, error) 
 				top[i].Indicators["IOPV"] = q.IOPV
 				top[i].Indicators["PremiumPct"] = top[i].ETF.PremiumPct
 			}
+			// ── P3-3 折溢价反向因子（仅实时模式生效，回测无溢价数据时跳过） ─────
+			// 把"过热的高溢价"反向映射到 Score 上：场内追高 → IOPV 被透支 → 回归净值的下行风险。
+			// 与 CapByPremium 的差异：CapByPremium 在 final 决策时仅做 recommendation 降档，
+			// 不会让"top1 严重溢价" 让位给"top2 折价"；P3-3 直接修正排名。
+			applyPremiumPenalty(top)
+			// 按修正后的 Score 重排 + 更新 Best；保持 dedupBySector 已经处理过的语义不变。
+			sortScoredDesc(top)
 		}
 	}
 
@@ -197,6 +205,54 @@ func dedupBySector(in []types.ScoredETF) []types.ScoredETF {
 		out = append(out, s)
 	}
 	return out
+}
+
+// 折溢价反向因子阈值（P3-3）：
+//   - PremiumPct ≥ +1.5%：追高警告，Score × 0.95
+//   - PremiumPct ≥ +3.0%：严重过热，Score × 0.85
+//
+// 折价 / 正常溢价不做任何调整（不放大已经折价的标的，避免双重激励）。
+const (
+	premiumPenaltyWarn      = 0.015
+	premiumPenaltyHigh      = 0.030
+	premiumPenaltyMultWarn  = 0.95
+	premiumPenaltyMultHigh  = 0.85
+)
+
+// applyPremiumPenalty 对 top 列表按 PremiumPct 做 Score 反向调整（in-place）。
+// 设计原则：
+//  1. 仅在 IOPV > 0 时生效（拿到了真实溢价才校准）；
+//  2. 与 CapByPremium 解耦：CapByPremium 是 final 决策层降档，不影响排名；
+//     这里直接修正排名，避免"top1 严重溢价、top2 折价"时仍买 top1。
+//  3. 调整幅度温和：-5% / -15%，不会让一个明显折价的弱动量标的反超强动量标的。
+func applyPremiumPenalty(top []types.ScoredETF) {
+	for i := range top {
+		if top[i].ETF.IOPV <= 0 {
+			continue
+		}
+		prem := top[i].ETF.PremiumPct
+		mult := 1.0
+		switch {
+		case prem >= premiumPenaltyHigh:
+			mult = premiumPenaltyMultHigh
+		case prem >= premiumPenaltyWarn:
+			mult = premiumPenaltyMultWarn
+		}
+		if mult < 1.0 {
+			top[i].Score *= mult
+			if top[i].Indicators == nil {
+				top[i].Indicators = map[string]float64{}
+			}
+			top[i].Indicators["PremiumPenaltyMult"] = mult
+		}
+	}
+}
+
+// sortScoredDesc 按 Score 降序对 in-place 排序，相等时保持原相对顺序（stable）。
+func sortScoredDesc(in []types.ScoredETF) {
+	sort.SliceStable(in, func(i, j int) bool {
+		return in[i].Score > in[j].Score
+	})
 }
 
 func buildRotationReason(c RotationCandidate, action RotationAction) string {

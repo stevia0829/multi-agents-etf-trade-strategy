@@ -153,6 +153,10 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 	_ = step // 保留参数兼容，状态化每日回测忽略 step
 
 	// Variant 注入：v3p1 在 v3 主流程之上启用 P1-1（双周期动量）+ P1-2（凸性调整）
+	// 默认开启 RegimeAwareP1：仅 bear/risk_off 时真正生效，bull/neutral 时回退到 P0 行为。
+	// 注意：MaxScore 由 Rank 内部根据 useConvexity 自动联动（true→30, false→6），
+	// 这里不要再改 p.MaxScore，否则会让 bull/neutral 期的过热门槛被无差别放宽，
+	// 导致 v3p1 ≠ v3，v3p1 反而比 v3 差（已踩过的坑，见 docs/CHANGELOG-strategy.md）。
 	if e.Variant == "v3p1" && e.Screener != nil && e.Screener.Rotation != nil {
 		p := e.Screener.Rotation.Params
 		p.EnableDualMomentum = true
@@ -161,9 +165,7 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		p.EnableConvexity = true
 		p.ConvexityLookback = 21
 		p.ConvexitySigmaFloor = 0.05
-		// 凸性调整后 score 量纲被 σ 放大（约 5~20 倍），原 MaxScore=6 过热门槛失效；
-		// 放宽到 30，仍保留 1.1 倍日间增长的过热判定语义。
-		p.MaxScore = 30
+		p.RegimeAwareP1 = true
 		e.Screener.Rotation.Params = p
 	}
 
@@ -377,6 +379,16 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		// 跑 Screener / Regime
 		e.Screener.AsOf = d
 		e.Regime.AsOf = d
+		// ── Regime-aware P1：先跑 Regime，把 trend 注入 Rotation，再跑 Screener ──
+		// 这样 P1-1/P1-2 才能根据"当日 trend"决定是否生效（v3p1 才需要，但写在通用路径里没副作用）。
+		regime, _ := e.Regime.Run(ctx)
+		if e.Screener.Rotation != nil {
+			if regime != nil {
+				e.Screener.Rotation.Params.RegimeTrend = regime.Trend
+			} else {
+				e.Screener.Rotation.Params.RegimeTrend = ""
+			}
+		}
 		scr, err := e.Screener.Run(ctx)
 		if err != nil || scr == nil || len(scr.Top5) == 0 {
 			// 无信号：若有持仓继续持有，下一日再判
@@ -413,7 +425,6 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 			target = newTarget
 		}
 
-		regime, _ := e.Regime.Run(ctx)
 		st := &types.AgentState{Screener: scr, Regime: regime}
 		dec := &types.FinalDecision{TargetETF: target}
 		agent.RuleBasedDecision(dec, st)

@@ -25,14 +25,34 @@ type MultiProviderConfig struct {
 
 // Build 根据配置构建一个 Resilient Client。
 // 任意 provider key 缺失时跳过，保证最少有 primary 可用。
+// 如果 primary 不可用（无 key / baseURL / model），自动从 fallbacks 里挑第一个可用的提升为 primary，
+// 让"用户只配了备模型 key"的场景也能跑通；全都没有时回到原行为返回 error。
 func (m MultiProviderConfig) Build(static StaticFallback) (Client, error) {
-	primary, err := buildOne(m.Primary)
-	if err != nil {
-		return nil, fmt.Errorf("build primary llm: %w", err)
+	primaryCfg := m.Primary
+	fallbacks := append([]ProviderConfig(nil), m.Fallbacks...)
+
+	if primaryCfg.APIKey == "" || primaryCfg.BaseURL == "" || primaryCfg.Model == "" {
+		// primary 不可用：尝试把第一个 enabled 的 fallback 提升为 primary
+		promoted := -1
+		for i, f := range fallbacks {
+			if f.Enabled && f.APIKey != "" && f.BaseURL != "" && f.Model != "" {
+				primaryCfg = f
+				promoted = i
+				break
+			}
+		}
+		if promoted >= 0 {
+			fallbacks = append(fallbacks[:promoted], fallbacks[promoted+1:]...)
+		}
 	}
 
-	fbs := make([]Client, 0, len(m.Fallbacks))
-	for _, f := range m.Fallbacks {
+	primary, err := buildOne(primaryCfg)
+	if err != nil {
+		return nil, fmt.Errorf("build primary llm (no available provider, please set at least one of *_API_KEY): %w", err)
+	}
+
+	fbs := make([]Client, 0, len(fallbacks))
+	for _, f := range fallbacks {
 		if !f.Enabled || f.APIKey == "" {
 			continue
 		}
