@@ -6,6 +6,40 @@ LLM 统一使用 **DeepSeek (deepseek-chat)**，通过 OpenAI 兼容协议调用
 
 ---
 
+## 项目最终效果（截图识别 · Cron 调度 · 长期记忆 · 微信闭环）
+
+下图是把"用户 → 微信 → OpenClaw 服务器 → eino Multi-Agent → 历史报告 Web 站"串起来的完整架构与数据流：
+
+![ETF Multi-Agent 整体架构](docs/images/architecture-overview.png)
+
+整套链路按"**T-1 晚上喂持仓 → T 日 08:30 出 advice → T 日 09:22 集合竞价复核 → 推送回微信 + 沉淀长期记忆**"运转，已落地的关键能力：
+
+- **A · 用户交互层（WeChat 闭环）**：T-1 收盘后我用微信把券商持仓截图发给个人号机器人；T 日 08:30 收到 Markdown 摘要 + 关键指标；09:20 集合竞价收到复核；任意时刻可在浏览器访问公网历史报告页全文检索回看。
+- **B · OpenClaw 服务器（托管 Skill + 项目）**：
+  - **截图识别 Skill**：Vision LLM 解析持仓截图 → `{code, name, qty, cost, mkt_value}` → 校验 / 纠错 → 写入 `current_holds.json`（增量覆盖），全程不要求用户手动录入；
+  - **Cron 调度器**：T 日 `08:30 → advice`、`09:22 → preopen` 复核两条定时任务，自动把 `current_holds.json` 注入为 `--current-hold a,b,c` 参数；
+  - **历史报告 Web 站**：Nginx + 静态页 + 简易 Flask 列表与全文检索，承载 `report/etf-report-*.md` 与 `*.json` sidecar。
+- **C · eino Multi-Agent ETF Strategy（本仓库）**：ScreenerAgent（21 日加权动量 + R² + Regime 闸门 + 持仓豁免位）→ News / Global / Tech / Regime / MoneyFlow / Memory 6 路 fan-out → FinalAgent 投委会 5 视角融合（板块自适应权重 + Recommendation 阈值 + 回撤冷却闸门 + 盈亏比闸门 + HoldReviews 持仓评审）→ Report Writer 落地 Markdown + JSON sidecar；09:20 由 PreOpenAgent 用 `gap_pct / premium` 校准 `chase / on_target / wait_pullback`。
+- **C-mem · 三层记忆管理**：
+  - 短期 = `types.AgentState`（fan-out 上下文）
+  - 中期 = `current_holds.json`（OpenClaw 写、advice / preopen 读）
+  - 长期 = `report/*.md`（MemoryAgent 读最近 5 份摘要为 patterns / warnings）
+- **D · 数据源 & LLM 基础设施**：腾讯财经 K 线主源（qfq）+ 东方财富备源 / 资金流，LLM 走 DeepSeek (deepseek-chat) OpenAI 兼容协议，并由 `llm/resilient.go` 完成"重试 / 降级链 / 静态 fallback"——保证在网络抖动 / 模型限流时也能离线跑出规则版决策。
+
+> 配套 Cron 表达式参考（OpenClaw 上托管，自动注入持仓参数）：
+>
+> ```cron
+> # T 日 08:30 → 出当日 advice 报告，附 T-1 晚上识别得到的持仓
+> 30 8 * * 1-5  cd /opt/eino-muti-etf-strategy && go run . --current-hold "$(jq -r '.codes|join(",")' current_holds.json)" >> logs/advice.log 2>&1
+>
+> # T 日 09:22 → 集合竞价复核，区分「加仓 / 新开仓」两条路径
+> 22 9 * * 1-5  cd /opt/eino-muti-etf-strategy && go run ./cmd/preopen --current-hold "$(jq -r '.codes|join(",")' current_holds.json)" >> logs/preopen.log 2>&1
+> ```
+
+整套闭环的设计前提与 [AGENTS.md](AGENTS.md) 第 2 条对齐：**advice 模式只在每天开盘前给一次信号，不做日内动态调整**——Cron 只承担"定时触发 + 持仓注入 + 推送回微信"，所有决策仍由 Multi-Agent 流水线一次性算清。
+
+---
+
 ## 一、快速开始
 
 ### 1. 准备环境
