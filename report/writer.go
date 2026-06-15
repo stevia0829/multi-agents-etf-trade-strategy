@@ -167,17 +167,32 @@ func writeNews(b *strings.Builder, n *types.NewsAnalysis) {
 	if n == nil {
 		return
 	}
-	b.WriteString("## 三、大面消息摘要 (NewsAgent)\n\n")
-	b.WriteString(fmt.Sprintf("- 板块: **%s** · 情绪: **%s** · 评分: **%.2f**\n\n", n.Sector, n.Sentiment, n.Score))
+	// 情绪标记
+	sentimentIcon := map[string]string{
+		"positive": "🟢", "negative": "🔴", "neutral": "⚪",
+	}[n.Sentiment]
+	if sentimentIcon == "" {
+		sentimentIcon = "⚪"
+	}
+
+	b.WriteString("## 三、消息面研判 (NewsAgent)\n\n")
+	b.WriteString(fmt.Sprintf("| 板块 | 情绪 | 评分 |\n|---|---|---|\n"))
+	b.WriteString(fmt.Sprintf("| **%s** | %s **%s** | **%.0f**/100 |\n\n", n.Sector, sentimentIcon, n.Sentiment, n.Score))
+
+	// 关键要点（信息密度优先）
 	if len(n.Highlight) > 0 {
-		b.WriteString("**关键要点**\n\n")
+		b.WriteString("### 关键信号\n\n")
 		for _, h := range n.Highlight {
-			b.WriteString("- " + h + "\n")
+			b.WriteString("- 💬 " + h + "\n")
 		}
 		b.WriteString("\n")
 	}
+
+	// 研判摘要（4段式结构化输出）
 	if n.Summary != "" {
-		b.WriteString("**研判**\n\n> " + indentQuote(n.Summary) + "\n\n")
+		b.WriteString("### 消息面速览\n\n")
+		// 不加引用块了，缩进引用块不利于长期记忆提取
+		b.WriteString(n.Summary + "\n\n")
 	}
 }
 

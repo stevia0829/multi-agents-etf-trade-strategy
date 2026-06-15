@@ -72,7 +72,7 @@ func TestBuildMarkdown_HasRequiredSections(t *testing.T) {
 		"建议持有区间",
 		"0.418 - 0.485",
 		"阻力位",
-		"大面消息摘要",
+		"消息面研判",
 		"加权综合评分",
 		"量化动量",
 		"消息面",

@@ -659,6 +659,8 @@ var (
 	reMemoOverall  = regexp.MustCompile(`综合评分:\s*\*\*([0-9.]+)\*\*\s*·\s*建议:\s*\*\*` + "`" + `([a-z_]+)` + "`")
 	reMemoTarget   = regexp.MustCompile(`\|\s*\*\*([^|*]+)\*\*\s*\|\s*` + "`" + `(\d{6})` + "`" + `\s*\|\s*([^|]+?)\s*\|`)
 	reMemoReason   = regexp.MustCompile(`\*\*综合论证\*\*\s*\n+>\s*([\s\S]+?)\n\n`)
+	reMemoNewsSent = regexp.MustCompile(`消息面研判[\s\S]*?\|\s*\*\*[^|]+\*\*\s*\|\s*[⚪🟢🔴]\s*\*\*(\w+)\*\*\s*\|\s*\*\*([0-9.]+)\*\*`)
+	reMemoNewsGist = regexp.MustCompile(`消息面速览\s*\n\n([\s\S]{1,200}?)\n\n`)
 	reMemoBlankSpc = regexp.MustCompile(`\s+`)
 )
 
@@ -668,6 +670,7 @@ var (
 //  1. 取"综合论证"段落原文；
 //  2. 去掉"①整体逻辑/②关键风险/③操作要点"等结构标签，保留核心信息；
 //  3. 长度截断到 ~120 字（中文按 rune 计），保留首尾关键句。
+//  4. 同时提取消息面情绪/评分/速览，用于跨日情绪趋势识别。
 func parseReportMemo(content string) (types.HistoryMemo, bool) {
 	memo := types.HistoryMemo{}
 	if m := reMemoDate.FindStringSubmatch(content); len(m) == 2 {
@@ -684,6 +687,18 @@ func parseReportMemo(content string) (types.HistoryMemo, bool) {
 	}
 	if m := reMemoReason.FindStringSubmatch(content); len(m) == 2 {
 		memo.ReasoningGist = compressReasoning(m[1])
+	}
+	// 提取消息面摘要
+	if m := reMemoNewsSent.FindStringSubmatch(content); len(m) == 3 {
+		memo.NewsSentiment = m[1]
+		fmt.Sscanf(m[2], "%f", &memo.NewsScore)
+	}
+	if m := reMemoNewsGist.FindStringSubmatch(content); len(m) == 2 {
+		gist := strings.TrimSpace(m[1])
+		if len([]rune(gist)) > 60 {
+			gist = string([]rune(gist)[:60]) + "…"
+		}
+		memo.NewsGist = gist
 	}
 	// 至少要有日期 + 建议 才算解析成功
 	if memo.Date == "" && memo.Recommendation == "" {

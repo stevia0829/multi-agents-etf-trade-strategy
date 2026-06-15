@@ -187,6 +187,10 @@ type HistoryMemo struct {
 	OverallScore   float64 `json:"overall_score"`
 	Recommendation string  `json:"recommendation"`
 	ReasoningGist  string  `json:"reasoning_gist"`
+	// 消息面摘要（用于长期记忆中的跨日情绪趋势识别）
+	NewsSentiment string  `json:"news_sentiment,omitempty"` // positive/neutral/negative
+	NewsScore     float64 `json:"news_score,omitempty"`     // 0-100
+	NewsGist      string  `json:"news_gist,omitempty"`      // ≤40字消息面要点
 }
 
 // RegimeAnalysis 由 RegimeAgent 输出，用作 FinalAgent 的"宏观环境硬性过滤"。
