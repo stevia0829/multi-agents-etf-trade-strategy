@@ -79,22 +79,63 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 	target := scr.Best
 	p.Logger.Printf("[pipeline] step1 done. best=%s(%s) score=%.2f", target.ETF.Name, target.ETF.Code, target.Score)
 
-	p.Logger.Println("[pipeline] step2: news / global / technical / regime / moneyflow fan-out…")
-	var wg sync.WaitGroup
-	wg.Add(5)
+	p.Logger.Println("[pipeline] step2: fan-out — news/top5-news / global / tech/top5-tech / regime / moneyflow…")
 
+	// fan-out 中的 fan-out：对 Top5 每支 ETF 都抓新闻和技术面，
+	// 填充 NewsList / TechList 供 FinalAgent 做跨标比较和 HoldReviews。
+	top5 := scr.Top5
+
+	var newsMu, techMu sync.Mutex
+	state.NewsList = make([]types.NewsAnalysis, 0, len(top5))
+	state.TechList = make([]types.TechnicalAnalysis, 0, len(top5))
+
+	var wg sync.WaitGroup
+	// 5 个主路径 + 对 Top5 的 news/tech 子 goroutine
+	// news 主路径 + top5 批量 news
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// Top1（best）的新闻：同步跑，用于 state.News 和 NewsList[0]
 		n, e := p.News.Run(ctx, target)
 		if e != nil {
-			p.Logger.Printf("[news] error: %v", e)
+			p.Logger.Printf("[news] best=%s error: %v", target.ETF.Code, e)
 		}
 		state.News = n
+		if n != nil {
+			n.ETFCode = target.ETF.Code
+			newsMu.Lock()
+			state.NewsList = append(state.NewsList, *n)
+			newsMu.Unlock()
+		}
+
+		// Top5 其余（index 1..）的新闻：扇出并发
+		if len(top5) > 1 {
+			var wgNews sync.WaitGroup
+			for i := 1; i < len(top5); i++ {
+				wgNews.Add(1)
+				go func(etf types.ScoredETF) {
+					defer wgNews.Done()
+					ni, e2 := p.News.Run(ctx, etf)
+					if e2 != nil {
+						p.Logger.Printf("[news] %s(%s) error: %v", etf.ETF.Name, etf.ETF.Code, e2)
+						return
+					}
+					if ni != nil {
+						ni.ETFCode = etf.ETF.Code
+						newsMu.Lock()
+						state.NewsList = append(state.NewsList, *ni)
+						newsMu.Unlock()
+					}
+				}(top5[i])
+			}
+			wgNews.Wait()
+		}
 	}()
+
+	// global
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// 同步查询时间锚点：所有指数报价不得晚于该时刻（回测一致性）。
-		// 当 --date 指定时：若 AsOf 已含具体时刻（hour 非 0），直接使用；否则锚定到当日 09:30。
 		if !p.Screener.AsOf.IsZero() {
 			anchor := p.Screener.AsOf
 			if anchor.Hour() == 0 && anchor.Minute() == 0 {
@@ -108,17 +149,50 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 		}
 		state.Global = g
 	}()
+
+	// tech 主路径 + top5 批量 tech
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		t, e := p.Tech.Run(ctx, target)
 		if e != nil {
-			p.Logger.Printf("[tech] error: %v", e)
+			p.Logger.Printf("[tech] best=%s error: %v", target.ETF.Code, e)
 		}
 		state.Tech = t
+		if t != nil {
+			t.ETFCode = target.ETF.Code
+			techMu.Lock()
+			state.TechList = append(state.TechList, *t)
+			techMu.Unlock()
+		}
+
+		if len(top5) > 1 {
+			var wgTech sync.WaitGroup
+			for i := 1; i < len(top5); i++ {
+				wgTech.Add(1)
+				go func(etf types.ScoredETF) {
+					defer wgTech.Done()
+					ti, e2 := p.Tech.Run(ctx, etf)
+					if e2 != nil {
+						p.Logger.Printf("[tech] %s(%s) error: %v", etf.ETF.Name, etf.ETF.Code, e2)
+						return
+					}
+					if ti != nil {
+						ti.ETFCode = etf.ETF.Code
+						techMu.Lock()
+						state.TechList = append(state.TechList, *ti)
+						techMu.Unlock()
+					}
+				}(top5[i])
+			}
+			wgTech.Wait()
+		}
 	}()
+
+	// regime
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// 同步 AsOf 给 RegimeAgent，保证回测一致性
 		p.Regime.AsOf = p.Screener.AsOf
 		r, e := p.Regime.Run(ctx)
 		if e != nil {
@@ -126,6 +200,9 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 		}
 		state.Regime = r
 	}()
+
+	// moneyflow
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		p.MoneyFlow.AsOf = p.Screener.AsOf
@@ -136,7 +213,7 @@ func (p *Pipeline) Run(ctx context.Context) (*types.AgentState, error) {
 		state.MoneyFlow = m
 	}()
 	wg.Wait()
-	p.Logger.Println("[pipeline] step2 done.")
+	p.Logger.Printf("[pipeline] step2 done. news=%d items  tech=%d items", len(state.NewsList), len(state.TechList))
 
 	p.Logger.Println("[pipeline] step3: final agent aggregating…")
 	final, err := p.Final.Run(ctx, state)
