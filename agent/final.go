@@ -47,13 +47,20 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
 
 你必须把这 5 位的声音整合为一份"投委会共识"，而不是单点意见的简单平均。
 
-【你将收到的 6 个子 Agent 输入】
-1) screener：量化筛选得分（指标、Top5、最佳标的）— 西蒙斯派的核心数据
-2) news：板块消息面情绪 — 巴菲特派验证基本面 / 索罗斯派验证情绪转折
+【你将收到的 6 个子 Agent 输入 + Top5 横向对比数据】
+1) screener：量化筛选得分 + Top5 候选清单（每只含完整技术指标：MA5/MA20/MA60/RSI/MACD/动量/波动率/量比/策略3量化分/年化/R²）— 西蒙斯派的核心数据
+2) news_list[0..N]：逐只 Top5 的消息面情绪分析（sentiment/score/highlight/summary）— 巴菲特派验证每只 ETF 的基本面
 3) global：海外（美股前夜+日韩盘中）传导 — 索罗斯派 + 达利欧派关注
-4) tech：技术面研判（趋势/MA/MACD/RSI/支撑压力）— 利弗莫尔派核心
+4) tech_list[0..N]：逐只 Top5 的技术面研判（趋势/MA/MACD/RSI/支撑压力/建议持有区间）— 利弗莫尔派对每只 ETF 的独立判断
 5) regime：宏观环境过滤（沪深300 趋势/回撤/建议仓位上限）— 达利欧派的硬约束
 6) money_flow：资金面（北向、ETF 申赎、主力资金代理估算）— 索罗斯派 + 利弗莫尔派交叉验证
+
+【关键：你现在拥有所有候选 ETF（含持仓）的完整数据】
+- top5 数组中每一只 ETF 都包含完整的 indicators（MA/RSI/MACD/动量/波动率/量比/策略3原始分/年化/R²），与 target 同口径；
+- 注意：top5 可能超过 5 只（用户持仓通过豁免机制追加在末尾），每个 is_current_hold=true 的条目就是用户当前持有的 ETF；
+- news_list 和 tech_list 分别提供了每只 ETF 的独立 LLM 分析（按 etf_code 匹配），覆盖所有 top5 候选（含持仓）；
+- 你必须横向对比所有候选（含持仓）的技术面强弱、消息面优劣、动量评分高低、溢价风险，而不是只盯着 target。
+- 做 picks 选择时必须对每只候选给出"为什么选它而不选其他候选"的具体技术面/消息面对比理由；不得仅凭 score 排序敷衍。
 
 【关键认知 — 因子相关性 (Simons 视角必检项)】
 不同板块的子因子物理意义差异巨大。你必须先识别"目标 ETF 的因子相关性 profile"，再做决策：
@@ -103,12 +110,12 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
 - stop_loss：MA20 / MA60 之间最近支撑下方 1%（"破位即出，绝不补仓摊低成本"）
 - take_profit：基于 ATR 或前高，建议 4%-8% 区间
 
-【reasoning 三段式约束 — 必须体现多视角共识】
-① 整体逻辑（≤140字）：
+【reasoning 三段式约束 — 必须体现多视角共识与跨标对比】
+① 整体逻辑（≤180字）：
    - 用 1 句话点明"本板块因子相关性 profile"（Simons 派语气）；
    - 用 1 句话给出 Regime + Global 的宏观判断（Dalio + Soros 派语气）；
-   - 用 1 句话给出趋势 / 动量信号（Livermore 派语气）；
-   - 用 1 句话给出估值 / 溢价 / 安全边际判断（Buffett 派语气）。
+   - 用 1~2 句话横向对比 Top5 中前 2~3 名的技术面差异（如：谁 MA 多头排列、谁 RSI 过热/超卖、谁 MACD 金叉/死叉），并明确说明 target 相比其他候选的技术面优劣（Livermore 派语气）；
+   - 用 1~2 句话横向对比 Top5 各标的消息面（news_list 中各标的 sentiment/score 对比），并给出估值/溢价/安全边际判断（Buffett 派语气）。
 ② 关键风险（≤100字，至少列 2 条）：
    - 必须结合 News 真实标题 + Tech 真实指标 + Regime 真实数据；
    - 禁止编造"北向资金净流出"作为日经 ETF 风险点；
@@ -126,7 +133,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
   "entry_price": 数字,
   "stop_loss": 数字,
   "take_profit": 数字,
-  "reasoning": "<=350 字三段式，按上述要求体现多视角共识",
+  "reasoning": "<=420 字三段式，按上述要求体现多视角共识与跨标技术面/消息面对比",
   "picks": [
     {
       "etf_code": "6位代码",
@@ -137,7 +144,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
       "entry_price": 数字,
       "stop_loss": 数字,
       "take_profit": 数字,
-      "rationale": "60~120 字：解释为什么是它而不是其他 4 支，必须显式对比 news_list / tech_list 的关键差异"
+      "rationale": "80~160 字：必须横向对比此标的技术面（MA/RSI/MACD）+ 消息面（news_list 匹配项的 sentiment/highlight）与其他 Top5 候选的关键差异，明确解释为什么是它而不是其他候选"
     }
   ],
   "hold_reviews": [
@@ -152,7 +159,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
       "action_desc": "中文人话（如：继续持有 / 减仓观察 / 平仓切换）",
       "news_bias": "positive | neutral | negative | unknown",
       "tech_trend": "up | flat | down | unknown",
-      "rationale": "60~140 字：结合 news_list / tech_list / score 三方面给出客观依据"
+      "rationale": "60~140 字：结合 top5 中该 ETF 的完整技术指标（MA/RSI/MACD/动量）+ news_list 匹配项的 sentiment/score + tech_list 匹配项的 trend/summary + 与 best 的 score 差距，给出客观评审结论"
     }
   ]
 }
@@ -809,28 +816,45 @@ func compressReasoning(s string) string {
 
 // ============== Top5 摘要 / Picks 兜底 ==============
 
-// summarizeTop5 把 Top5 候选压缩成一份轻量摘要，注入 LLM payload 用于跨标比较。
-// 仅保留比较关键字段：code / name / sector / score / premium_pct / action / reason / 关键指标。
+// summarizeTop5 把 Top5 候选压缩成一份摘要，注入 LLM payload 用于跨标比较。
+// 包含完整技术指标（MA/RSI/MACD/动量/波动率/量比）+ 策略3量化分/年化/R²，供 LLM 做多维度横向对比。
 func summarizeTop5(top []types.ScoredETF) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(top))
 	for i, e := range top {
 		ind := e.Indicators
-		out = append(out, map[string]interface{}{
-			"rank":         i + 1,
-			"code":         e.ETF.Code,
-			"name":         e.ETF.Name,
-			"sector":       e.ETF.Sector,
-			"price":        e.ETF.Price,
-			"premium_pct":  e.ETF.PremiumPct,
-			"premium_risk": PremiumRiskLabel(e.ETF.PremiumPct),
-			"score":        e.Score,
-			"action":       e.Action,
-			"action_desc":  e.ActionDesc,
-			"reason":       e.Reason,
-			"momentum_20":  ind["Momentum20"],
-			"vol_ratio":    ind["VolRatio"],
-			"volatility":   ind["Volatility"],
-		})
+		entry := map[string]interface{}{
+			"rank":                i + 1,
+			"code":                e.ETF.Code,
+			"name":                e.ETF.Name,
+			"sector":              e.ETF.Sector,
+			"price":               e.ETF.Price,
+			"premium_pct":         e.ETF.PremiumPct,
+			"premium_risk":        PremiumRiskLabel(e.ETF.PremiumPct),
+			"score":               e.Score,
+			"action":              e.Action,
+			"action_desc":         e.ActionDesc,
+			"reason":              e.Reason,
+			"is_current_hold":     e.IsCurrentHold,
+			"indicators":          ind,
+			// 以下为 LLM 易读的扁平化关键指标（同时保留完整 indicators map）
+			"ma5":                 ind["MA5"],
+			"ma20":                ind["MA20"],
+			"ma60":                ind["MA60"],
+			"rsi":                 ind["RSI"],
+			"macd_dif":            ind["DIF"],
+			"macd_dea":            ind["DEA"],
+			"macd_hist":           ind["HIST"],
+			"momentum_20":         ind["Momentum20"],
+			"vol_ratio":           ind["VolRatio"],
+			"volatility":          ind["Volatility"],
+			"strategy3_score":     ind["Strategy3Score"],
+			"annualized_return":   ind["AnnualizedReturn"],
+			"weighted_r2":         ind["WeightedR2"],
+			"prev_strategy3_score": ind["PrevStrategy3Score"],
+			"iopv":                ind["IOPV"],
+			"premium_penalty_mult": ind["PremiumPenaltyMult"],
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -1110,6 +1134,7 @@ func holdCandidatesPayload(st *types.AgentState) []map[string]interface{} {
 			"is_top5":      i < 5,
 			"premium_pct":  e.ETF.PremiumPct,
 			"premium_risk": PremiumRiskLabel(e.ETF.PremiumPct),
+			"indicators":   e.Indicators,
 		}
 		if n, ok := newsByCode[e.ETF.Code]; ok {
 			row["news_sentiment"] = n.Sentiment
