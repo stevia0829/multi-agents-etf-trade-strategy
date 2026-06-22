@@ -31,7 +31,7 @@ func main() {
 		btStep      = flag.Int("bt-step", 5, "backtest 采样间隔（交易日）")
 		btHold      = flag.Int("bt-hold", 5, "backtest 持有期（交易日）")
 		btMax       = flag.Int("bt-max", 60, "backtest 最大样本数")
-		btVariant   = flag.String("bt-variant", "both", "回测变体：v3 / v3v2 / both")
+		btVariant   = flag.String("bt-variant", "both", "回测变体：v3 / v3v2 / v3p1 / v3opt / both / both_p1 / both_opt / joinquant")
 	)
 	flag.Parse()
 
@@ -271,7 +271,7 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 	}
 
 	switch variant {
-	case "v3", "v3v2", "joinquant", "v3p1":
+	case "v3", "v3v2", "joinquant", "v3p1", "v3opt":
 		res := runOne(variant)
 		filename := fmt.Sprintf("backtest-%s-%s.md", variant, time.Now().Format("20060102-150405"))
 		path := filepath.Join(reportDir, filename)
@@ -305,8 +305,20 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 		}
 		abs, _ := filepath.Abs(path)
 		fmt.Println("📄 P0 vs P1 对比回测报告已生成:", abs)
+	case "both_opt":
+		resV3 := runOne("v3")
+		resV3Opt := runOne("v3opt")
+		filename := fmt.Sprintf("backtest-compare-opt-%s.md", time.Now().Format("20060102-150405"))
+		path := filepath.Join(reportDir, filename)
+		md := backtest.BuildOptCompareMarkdown(resV3, resV3Opt)
+		if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
+			fmt.Println("write opt compare report error:", err)
+			return
+		}
+		abs, _ := filepath.Abs(path)
+		fmt.Println("📄 v3 vs v3opt（P0+P1 优化）对比回测报告已生成:", abs)
 	default:
-		fmt.Printf("invalid --bt-variant: %s (expect v3/v3v2/v3p1/both/both_p1/joinquant)\n", variant)
+		fmt.Printf("invalid --bt-variant: %s (expect v3/v3v2/v3p1/v3opt/both/both_p1/both_opt/joinquant)\n", variant)
 		os.Exit(2)
 	}
 	_ = agent.NewScreenerAgent

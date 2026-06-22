@@ -171,6 +171,13 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		e.Screener.Rotation.Params = p
 	}
 
+	// v3opt：多窗口动量融合 + 滚动分位数入场阈值（P0+P1 优化变体）
+	if e.Variant == "v3opt" && e.Screener != nil && e.Screener.Rotation != nil {
+		p := e.Screener.Rotation.Params
+		p.MultiWindowWindows = []int{10, 21, 40}
+		e.Screener.Rotation.Params = p
+	}
+
 	// 用基准 ETF（510300）的历史 K 线来确定有效交易日序列。
 	// 按区间日数 × 1.5 推算所需 days（日历→交易日冗余充足，不再固定 1500 被打爆）。
 	needDays := int(end.Sub(start).Hours()/24)*3/2 + 200
@@ -284,6 +291,12 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		}
 		return last
 	}
+
+	// P0: 滚动分数历史（仅 v3opt 生效），用于计算分位数入场阈值
+	scoreHistory := make([]float64, 0, 64)
+	const percentileLookback = 60   // 回看窗口：最近 60 个交易日
+	const percentileMinSamples = 20 // 冷启动期最少样本（< 20 退化到 rawScore > 0）
+	const entryPercentile = 40      // P40：只有分数高于近 60 日 P40 分位才入场
 
 	for di, d := range dates {
 		select {
@@ -442,6 +455,11 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		if rawScore == 0 {
 			rawScore = target.Score / 100 * 6 // 退化：从归一化分反推
 		}
+		// P0: 累积滚动分数历史（所有有效信号日，含 hold/avoid 天）
+		scoreHistory = append(scoreHistory, rawScore)
+		if len(scoreHistory) > percentileLookback {
+			scoreHistory = scoreHistory[1:]
+		}
 		dec := &types.FinalDecision{TargetETF: target}
 		dec.OverallScore = target.Score // 报告展示用归一化分
 		// 裸分 > 0 即买入（对齐聚宽 MinScore=0 语义）
@@ -476,7 +494,15 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		}
 
 		// 决策映射：裸分 > 0 即可入场；持仓时只看 rank[0] 是否换标（对齐聚宽）
-		shouldEnter := rawScore > 0
+		// P0 (v3opt)：入场阈值改为滚动分位数——只有裸分高于近 60 日 P40 分位才入场
+		entryThreshold := 0.0
+		if e.Variant == "v3opt" && len(scoreHistory) >= percentileMinSamples {
+			entryThreshold = percentile(scoreHistory, entryPercentile)
+			if entryThreshold < 0 {
+				entryThreshold = 0 // 永远不买负动量
+			}
+		}
+		shouldEnter := rawScore > entryThreshold
 		if hold != nil {
 			// 已持仓：只有 rank[0] 换标才平仓（对齐聚宽）
 			if target.ETF.Code == hold.code {
@@ -588,6 +614,34 @@ func (e *Engine) computeBenchmarkReturn(start, end time.Time) float64 {
 		return 0
 	}
 	return (exit - entry) / entry
+}
+
+// percentile 计算数据集的 p 百分位值（线性插值法）。
+// 输入会被排序，p 范围 [0, 100]。
+func percentile(data []float64, p float64) float64 {
+	if len(data) == 0 {
+		return 0
+	}
+	if len(data) == 1 {
+		return data[0]
+	}
+	sorted := make([]float64, len(data))
+	copy(sorted, data)
+	sort.Float64s(sorted)
+	if p <= 0 {
+		return sorted[0]
+	}
+	if p >= 100 {
+		return sorted[len(sorted)-1]
+	}
+	idx := p / 100 * float64(len(sorted)-1)
+	lower := int(math.Floor(idx))
+	upper := int(math.Ceil(idx))
+	if lower == upper {
+		return sorted[lower]
+	}
+	frac := idx - float64(lower)
+	return sorted[lower]*(1-frac) + sorted[upper]*frac
 }
 
 // indexOnOrAfter 返回 K 线序列中第一根 Date >= asOf 的索引；找不到返回 -1。
@@ -979,6 +1033,94 @@ func writeBucketCompare(b *strings.Builder, av, bv map[string]Bucket) {
 		b.WriteString(fmt.Sprintf("| %s | %d | %.2f%% | %+.2f%% | %d | %.2f%% | %+.2f%% |\n",
 			k, x.Count, x.WinRate*100, x.AvgRet*100, y.Count, y.WinRate*100, y.AvgRet*100))
 	}
+}
+
+// BuildOptCompareMarkdown 对比 v3（基线）与 v3opt（多窗口动量 + 分位数入场阈值）的回测结果。
+func BuildOptCompareMarkdown(v3, v3opt *Result) string {
+	var b strings.Builder
+	b.WriteString("# 回测对比：v3 基线 vs v3opt（P0+P1 优化）\n\n")
+	b.WriteString(fmt.Sprintf("- 回测区间: **%s ~ %s** (%d 交易日)\n",
+		v3.StartDate.Format("2006-01-02"), v3.EndDate.Format("2006-01-02"), v3.Total))
+	b.WriteString(fmt.Sprintf("- 基准: `%s` (buy & hold %+.2f%%)\n\n",
+		defaultStr(v3.BenchmarkCode, "510300"), v3.BenchmarkReturn*100))
+
+	b.WriteString("## 优化说明\n\n")
+	b.WriteString("- **P1-a 多窗口动量融合**: 对 {10, 21, 40} 三个回归窗口分别计算加权对数回归动量分，按各自 R² 加权融合\n")
+	b.WriteString("  - 短窗口(10日)捕获快速趋势，长窗口(40日)过滤噪音，融合后跨行情节奏更鲁棒\n")
+	b.WriteString("  - 融合公式: `fused = Σ max(R²_m, 0) × score_m / Σ max(R²_m, 0)`\n")
+	b.WriteString("- **P0 滚动分位数入场阈值**: 用近 60 日裸分 P40 分位作为入场门槛替代固定 0\n")
+	b.WriteString("  - 牛市门槛自动提高（过滤弱信号），熊市退化到 >0（不买负动量）\n")
+	b.WriteString("  - 冷启动期（< 20 日）退化到原始 `rawScore > 0` 行为\n\n")
+
+	b.WriteString("## 一、整体对比\n\n")
+	b.WriteString("| 指标 | v3 基线 | v3opt 优化 | Δ |\n|---|---|---|---|\n")
+	row := func(label string, av, bv float64, fmtPct bool) {
+		var sa, sb, sd string
+		if fmtPct {
+			sa = fmt.Sprintf("%.2f%%", av*100)
+			sb = fmt.Sprintf("%.2f%%", bv*100)
+			sd = fmt.Sprintf("%+.2f pp", (bv-av)*100)
+		} else {
+			sa = fmtFinite(av)
+			sb = fmtFinite(bv)
+			sd = fmt.Sprintf("%+.2f", bv-av)
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", label, sa, sb, sd))
+	}
+	rowInt := func(label string, av, bv int) {
+		b.WriteString(fmt.Sprintf("| %s | %d | %d | %+d |\n", label, av, bv, bv-av))
+	}
+	rowInt("样本数", v3.Total, v3opt.Total)
+	rowInt("实际建仓数", v3.Wins+v3.Losses, v3opt.Wins+v3opt.Losses)
+	rowInt("胜次", v3.Wins, v3opt.Wins)
+	rowInt("败次", v3.Losses, v3opt.Losses)
+	row("胜率", v3.WinRate, v3opt.WinRate, true)
+	row("平均加权收益", v3.AvgReturn, v3opt.AvgReturn, true)
+	row("最大单笔收益", v3.MaxReturn, v3opt.MaxReturn, true)
+	row("最大单笔亏损", v3.MinReturn, v3opt.MinReturn, true)
+	row("收益标准差", v3.StdReturn, v3opt.StdReturn, true)
+	row("简易 Sharpe", v3.Sharpe, v3opt.Sharpe, false)
+	row("累计净收益", v3.TotalReturn, v3opt.TotalReturn, true)
+	row("年化收益", v3.AnnualReturn, v3opt.AnnualReturn, true)
+	row("最大回撤", v3.MaxDrawdown, v3opt.MaxDrawdown, true)
+	row("Calmar", v3.Calmar, v3opt.Calmar, false)
+	row("Sortino", v3.Sortino, v3opt.Sortino, false)
+	row("Profit Factor", v3.ProfitFactor, v3opt.ProfitFactor, false)
+	row("盈亏比", v3.WinLossRatio, v3opt.WinLossRatio, false)
+	row("Alpha vs 基准", v3.Alpha, v3opt.Alpha, true)
+
+	b.WriteString("\n## 二、按 Recommendation 分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.ByReco, v3opt.ByReco, "v3", "v3opt")
+	b.WriteString("\n## 三、按宏观环境分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.ByRegime, v3opt.ByRegime, "v3", "v3opt")
+	b.WriteString("\n## 四、按板块分桶对比\n\n")
+	writeBucketCompareLabeled(&b, v3.BySector, v3opt.BySector, "v3", "v3opt")
+
+	b.WriteString("\n## 五、v3 基线 近 20 笔交易明细\n\n")
+	writeTradeTail(&b, v3.Trades, 20)
+	b.WriteString("\n## 六、v3opt 优化 近 20 笔交易明细\n\n")
+	writeTradeTail(&b, v3opt.Trades, 20)
+
+	b.WriteString("\n## 七、结论速览\n\n")
+	dSharpe := v3opt.Sharpe - v3.Sharpe
+	dRet := (v3opt.TotalReturn - v3.TotalReturn) * 100
+	dMDD := (v3opt.MaxDrawdown - v3.MaxDrawdown) * 100
+	dCalmar := v3opt.Calmar - v3.Calmar
+	b.WriteString(fmt.Sprintf("- Sharpe 变化：%+.4f（v3 %.4f → v3opt %.4f）\n", dSharpe, v3.Sharpe, v3opt.Sharpe))
+	b.WriteString(fmt.Sprintf("- 累计净收益变化：%+.2f pp（v3 %+.2f%% → v3opt %+.2f%%）\n", dRet, v3.TotalReturn*100, v3opt.TotalReturn*100))
+	b.WriteString(fmt.Sprintf("- 最大回撤变化：%+.2f pp（v3 %.2f%% → v3opt %.2f%%）\n", dMDD, v3.MaxDrawdown*100, v3opt.MaxDrawdown*100))
+	b.WriteString(fmt.Sprintf("- Calmar 变化：%+.2f（v3 %s → v3opt %s）\n", dCalmar, fmtFinite(v3.Calmar), fmtFinite(v3opt.Calmar)))
+	switch {
+	case dSharpe > 0.05 && dMDD <= 0:
+		b.WriteString("- 综合判断：**v3opt 显著提升 Sharpe 且不放大回撤，建议合入主流程**。\n")
+	case dSharpe > 0.05 && dMDD > 0:
+		b.WriteString("- 综合判断：v3opt 提升 Sharpe 但回撤略放大，建议保留为可选开关。\n")
+	case dSharpe > 0 && dSharpe <= 0.05:
+		b.WriteString("- 综合判断：v3opt 有微弱改善，收益增量不显著，建议扩大样本再做判断。\n")
+	default:
+		b.WriteString("- 综合判断：v3opt 在该区间未带来改善，甚至可能过拟合，建议换区间验证。\n")
+	}
+	return b.String()
 }
 
 func writeTradeTail(b *strings.Builder, trades []Trade, n int) {
