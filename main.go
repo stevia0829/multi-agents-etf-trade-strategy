@@ -315,8 +315,9 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 		abs, _ := filepath.Abs(path)
 		fmt.Println("📄 P0 vs P1 对比回测报告已生成:", abs)
 	case "both_opt":
-		resV3 := runOne("v3")
+		// v3opt 先跑（需要 41 根 K 线），缓存后 v3（22 根）直接从缓存截取，保证基线一致
 		resV3Opt := runOne("v3opt")
+		resV3 := runOne("v3")
 		filename := fmt.Sprintf("backtest-compare-opt-%s.md", time.Now().Format("20060102-150405"))
 		path := filepath.Join(reportDir, filename)
 		md := backtest.BuildOptCompareMarkdown(resV3, resV3Opt)
