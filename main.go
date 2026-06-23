@@ -246,6 +246,15 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 
 	ds := datasource.ETFDataSource(datasource.NewEastMoneyDataSource())
 
+	// 对比模式 (both/both_p1/both_opt) 下，两个变体必须跑在完全相同的数据基线上。
+	// 用 CachedDataSource 包装底层源：第一个变体拉数据并缓存，第二个变体直接复用。
+	// 单变体模式 (v3/v3v2/v3p1/v3opt/joinquant) 不包装（无对比需求）。
+	var sharedDS *datasource.CachedDataSource
+	if variant == "both" || variant == "both_p1" || variant == "both_opt" {
+		sharedDS = datasource.NewCachedDataSource(ds)
+		ds = sharedDS
+	}
+
 	if reportDir == "" {
 		reportDir = "report"
 	}
