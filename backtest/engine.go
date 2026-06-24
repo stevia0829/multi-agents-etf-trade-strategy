@@ -172,10 +172,9 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 	}
 
 	// v3opt：多窗口动量融合 + 滚动分位数入场阈值（P0+P1 优化变体）
-	if e.Variant == "v3opt" && e.Screener != nil && e.Screener.Rotation != nil {
-		p := e.Screener.Rotation.Params
-		p.MultiWindowWindows = []int{10, 21, 40}
-		e.Screener.Rotation.Params = p
+	// 注：v3opt 走 JoinQuant 同路径（直接 RotationAgent），不走 Screener
+	if e.Variant == "v3opt" {
+		// 配置在 joinquant 分支内注入
 	}
 
 	// 用基准 ETF（510300）的历史 K 线来确定有效交易日序列。
@@ -308,7 +307,7 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		// ── 聚宽对齐模式：直接调 RotationAgent，按聚宽口径满仓持有 rank[0] ──────
 		// 旁路 Screener 的所有外围装饰（dedupBySector / RuleBasedDecision / PositionCap）。
 		// 聚宽口径：MinScore=0（剔除负分）、MaxScore=6 + 1.1 倍过热门槛、不做板块去重、满仓 100%。
-		if e.Variant == "joinquant" {
+		if e.Variant == "joinquant" || e.Variant == "v3opt" {
 			rot := agent.NewRotationAgent(e.DS)
 			rot.AsOf = d
 			// 关键：MinScore 对齐聚宽 = 0（不允许负分进 rank）
@@ -317,6 +316,11 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 			rot.Params.ScoreThresholdMultiplier = 1.1
 			rot.Params.MDays = 21
 			rot.Params.TopN = 0 // 0 = 不截断，保留全部排名
+
+			// P1: 多窗口动量融合（仅 v3opt）
+			if e.Variant == "v3opt" {
+				rot.Params.MultiWindowWindows = []int{10, 21, 40}
+			}
 
 			ranked, rerr := rot.Rank(ctx)
 			if rerr != nil || len(ranked) == 0 {
@@ -338,6 +342,52 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 				continue
 			}
 			top := ranked[0]
+
+			// P0: 滚动分位数入场过滤（仅 v3opt）
+			// 累积裸分历史，当样本够时用 P40 分位做门槛
+			if e.Variant == "v3opt" {
+				scoreHistory = append(scoreHistory, top.Score)
+				if len(scoreHistory) > percentileLookback {
+					scoreHistory = scoreHistory[1:]
+				}
+				if len(scoreHistory) >= percentileMinSamples {
+					threshold := percentile(scoreHistory, entryPercentile)
+					if threshold < 0 {
+						threshold = 0
+					}
+					if top.Score < threshold {
+						// 裸分低于近 60 日 P40 → 视为弱信号，不入场
+						// 但若已持仓且 rank[0] 仍是持仓标的 → 继续持有（不因门槛平仓）
+						if hold != nil && hold.code == top.ETF.Code {
+							if di == len(dates)-1 {
+								px := priceOnDate(hold.klineCache, d)
+								if px <= 0 {
+									px = hold.entryPrice
+								}
+								exit(d, px, "end_of_range")
+							}
+							continue
+						}
+						// 弱信号 + 非持仓 → 若有持仓则平仓，否则空仓等待
+						if hold != nil {
+							px := priceOnDate(hold.klineCache, d)
+							if px <= 0 {
+								px = hold.entryPrice
+							}
+							exit(d, px, "weak_signal")
+						}
+						if di == len(dates)-1 && hold != nil {
+							px := priceOnDate(hold.klineCache, d)
+							if px <= 0 {
+								px = hold.entryPrice
+							}
+							exit(d, px, "end_of_range")
+						}
+						continue
+					}
+				}
+			}
+
 			// 满仓 100%
 			if hold != nil {
 				if hold.code == top.ETF.Code {
@@ -455,11 +505,6 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		if rawScore == 0 {
 			rawScore = target.Score / 100 * 6 // 退化：从归一化分反推
 		}
-		// P0: 累积滚动分数历史（所有有效信号日，含 hold/avoid 天）
-		scoreHistory = append(scoreHistory, rawScore)
-		if len(scoreHistory) > percentileLookback {
-			scoreHistory = scoreHistory[1:]
-		}
 		dec := &types.FinalDecision{TargetETF: target}
 		dec.OverallScore = target.Score // 报告展示用归一化分
 		// 裸分 > 0 即买入（对齐聚宽 MinScore=0 语义）
@@ -494,15 +539,7 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		}
 
 		// 决策映射：裸分 > 0 即可入场；持仓时只看 rank[0] 是否换标（对齐聚宽）
-		// P0 (v3opt)：入场阈值改为滚动分位数——只有裸分高于近 60 日 P40 分位才入场
-		entryThreshold := 0.0
-		if e.Variant == "v3opt" && len(scoreHistory) >= percentileMinSamples {
-			entryThreshold = percentile(scoreHistory, entryPercentile)
-			if entryThreshold < 0 {
-				entryThreshold = 0 // 永远不买负动量
-			}
-		}
-		shouldEnter := rawScore > entryThreshold
+		shouldEnter := rawScore > 0
 		if hold != nil {
 			// 已持仓：只有 rank[0] 换标才平仓（对齐聚宽）
 			if target.ETF.Code == hold.code {
