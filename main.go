@@ -16,6 +16,7 @@ import (
 	"github.com/multi-agents-etf-trade-strategy/datasource"
 	"github.com/multi-agents-etf-trade-strategy/orchestrator"
 	"github.com/multi-agents-etf-trade-strategy/report"
+	"github.com/multi-agents-etf-trade-strategy/types"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
 		reportDir   = flag.String("report-dir", "report", "Markdown 报告输出目录")
 		skipReport  = flag.Bool("skip-report", false, "仅打印结果，不落地报告")
 		currentHold = flag.String("current-hold", "", "可选：当前持仓 ETF 代码（支持多个，逗号分隔，如 159915,512660），用于在报告中给出持仓对照与 FinalAgent 持仓评审；留空则跳过该章节，系统不做任何本地持久化")
-		mode        = flag.String("mode", "advice", "运行模式：advice（默认，单次出报告） / backtest（历史胜率回测）")
+		mode        = flag.String("mode", "advice", "运行模式：advice（默认，单次出报告） / backtest（历史胜率回测） / intraday（盘中实时盯盘）")
 		btStart     = flag.String("bt-start", "", "backtest 起始日 (YYYY-MM-DD)")
 		btEnd       = flag.String("bt-end", "", "backtest 结束日 (YYYY-MM-DD)，默认 --date 或今天")
 		btStep      = flag.Int("bt-step", 5, "backtest 采样间隔（交易日，状态化模式下忽略）")
@@ -37,6 +38,11 @@ func main() {
 
 	if *mode == "backtest" {
 		runBacktest(*btStart, *btEnd, *dateFlag, *btStep, *btHold, *btMax, *btVariant, *reportDir)
+		return
+	}
+
+	if *mode == "intraday" {
+		runIntraday(*currentHold, *skipReport, *reportDir)
 		return
 	}
 
@@ -216,6 +222,89 @@ func parseCurrentHolds(raw string) []string {
 		return nil
 	}
 	return out
+}
+
+// runIntraday 盘中实时盯盘：
+//   - 先跑一遍 advice pipeline 获取今日 Top5 + FinalDecision
+//   - 再用 IntradayWatchAgent 结合实时行情给出买卖指导
+func runIntraday(currentHoldRaw string, skipReport bool, reportDir string) {
+	holds := parseCurrentHolds(currentHoldRaw)
+
+	fmt.Println("=== 盘中实时盯盘 ===")
+	fmt.Println("时间:", time.Now().Format("2006-01-02 15:04:05"))
+	if len(holds) > 0 {
+		fmt.Println("持仓:", strings.Join(holds, ", "))
+	}
+
+	// 第一步：跑 advice pipeline 获取今日报告数据
+	fmt.Println("\n[1/2] 获取今日报告 Top5 + 决策...")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cfg := config.Load()
+	pipe, err := orchestrator.NewPipeline(cfg)
+	if err != nil {
+		fmt.Println("init pipeline error:", err)
+		os.Exit(1)
+	}
+	pipe.CurrentHolds = holds
+
+	state, err := pipe.Run(ctx)
+	if err != nil {
+		fmt.Println("pipeline error:", err)
+		os.Exit(1)
+	}
+
+	if state.Screener == nil || len(state.Screener.Top5) == 0 {
+		fmt.Println("错误：无法获取今日 Top5，盘中盯盘需要至少有推荐标的")
+		os.Exit(1)
+	}
+
+	fmt.Printf("  Top1: %s(%s)  分数: %.2f\n", state.Screener.Best.ETF.Name, state.Screener.Best.ETF.Code, state.Screener.Best.Score)
+
+	// 落地早报（如果需要）
+	if !skipReport {
+		w := report.NewWriter(reportDir)
+		path, err := w.Save(state)
+		if err == nil {
+			fmt.Println("  早报已生成:", path)
+		}
+	}
+
+	// 第二步：盘中实时盯盘
+	fmt.Println("\n[2/2] 获取实时行情并分析...")
+
+	ds := datasource.NewEastMoneyDataSource()
+	conf := types.IntradayWatchConfig{
+		CurrentHolds:  holds,
+		FinalDecision: state.Final,
+		Top5:          state.Screener.Top5,
+	}
+
+	watchCtx, watchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer watchCancel()
+
+	watcher := agent.NewIntradayWatchAgent(ds, conf)
+	result, err := watcher.Run(watchCtx)
+	if err != nil {
+		fmt.Println("盘中盯盘错误:", err)
+		os.Exit(1)
+	}
+
+	// 输出到终端
+	fmt.Print(agent.FormatIntradayCLI(result))
+
+	// 落地 JSON 快照
+	if !skipReport {
+		snapDir := filepath.Join(reportDir, "intraday")
+		os.MkdirAll(snapDir, 0o755)
+		snapFile := filepath.Join(snapDir, fmt.Sprintf("intraday-%s.json", time.Now().Format("20060102-150405")))
+		data, _ := json.MarshalIndent(result, "", "  ")
+		if err := os.WriteFile(snapFile, data, 0o644); err == nil {
+			abs, _ := filepath.Abs(snapFile)
+			fmt.Println("\n📄 盘中快照已保存:", abs)
+		}
+	}
 }
 
 // runBacktest 历史胜率回测：

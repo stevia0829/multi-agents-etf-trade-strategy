@@ -267,3 +267,60 @@ type HoldAdvice struct {
 	BestName    string `json:"best_name"`   // Top1 名称
 	Suggestion  string `json:"suggestion"`  // 一句话建议
 }
+
+// ─── 盘中实时盯盘 (IntradayWatchAgent) ─────────────────────────────────────
+
+// IntradayWatchConfig 盘中盯盘的输入配置。
+type IntradayWatchConfig struct {
+	CurrentHolds  []string       // 当前持仓代码列表
+	FinalDecision *FinalDecision // 今日早报的最终决策（可为 nil，退化到纯实时信号）
+	Top5          []ScoredETF    // 今日 Screener Top5（FinalDecision 为 nil 时用）
+}
+
+// IntradaySnapshot 单只标的的盘中实时快照 + 判定结论。
+type IntradaySnapshot struct {
+	ETFCode   string  `json:"etf_code"`
+	ETFName   string  `json:"etf_name"`
+	Sector    string  `json:"sector"`
+	IsHold    bool    `json:"is_hold"`     // 是否为当前持仓
+	IsTopPick bool    `json:"is_top_pick"` // 是否为今日推荐 Top5
+
+	// ── 实时行情 ──
+	Price     float64 `json:"price"`      // 最新价
+	PrevClose float64 `json:"prev_close"` // 昨收
+	ChangePct float64 `json:"change_pct"` // 当日涨跌幅 %
+	Open      float64 `json:"open"`       // 今日开盘（近似：取当日 K 线 Open 或实时推算）
+	DayHigh   float64 `json:"day_high"`   // 今日最高（近似）
+	DayLow    float64 `json:"day_low"`    // 今日最低（近似）
+	IOPV      float64 `json:"iopv"`
+	Premium   float64 `json:"premium"` // 溢价率 (price-iopv)/iopv
+
+	// ── 与报告关键价位的关系 ──
+	EntryPrice float64 `json:"entry_price"` // 早报建议入场价（无则为 0）
+	StopLoss   float64 `json:"stop_loss"`   // 早报止损价
+	TakeProfit float64 `json:"take_profit"` // 早报止盈价
+	DistToEntry float64 `json:"dist_to_entry"` // (price-entry)/entry，正=高于入场价
+	DistToStop  float64 `json:"dist_to_stop"`  // (price-stop)/stop，正=未破止损
+	DistToTP    float64 `json:"dist_to_tp"`    // (price-tp)/tp，正=已超止盈
+
+	// ── 近期 K 线技术指标 ──
+	MA5       float64 `json:"ma5"`
+	MA10      float64 `json:"ma10"`
+	VsMA5     float64 `json:"vs_ma5"`     // (price-ma5)/ma5 %
+	RecentTrend string `json:"recent_trend"` // up / flat / down（近 5 日）
+
+	// ── 判定结论 ──
+	Signal    string `json:"signal"`     // chase_now / pullback_entry / wait / abandon / hold / trim_now / stop_out / add
+	SignalCn  string `json:"signal_cn"`  // 中文一句话
+	Priority  string `json:"priority"`   // urgent / watch / info
+	Rationale string `json:"rationale"`  // 2~3 句客观依据
+}
+
+// IntradayAnalysis 盘中盯盘综合输出。
+type IntradayAnalysis struct {
+	GeneratedAt  time.Time           `json:"generated_at"`
+	MarketIndex  IntradaySnapshot    `json:"market_index"`  // 510300 大盘快照
+	Snapshots    []IntradaySnapshot  `json:"snapshots"`     // 持仓 + 推荐 合并去重
+	UrgentCount  int                 `json:"urgent_count"`  // urgent 级信号数
+	Summary      string              `json:"summary"`       // 一段话总结
+}
