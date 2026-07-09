@@ -1,9 +1,25 @@
+agent/intraday.go
+  s_acf23497fda065::t_cedde843807f39 588-591
+report/preopen_writer.go
+  s_acf23497fda065::t_2aa6b1ead56a09 80-81,90,94-98
+report/writer.go
+  s_acf23497fda065::t_4265e0fafa0b81 297-300,306-309
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.4",
+  "git_ai_version": "1.6.10",
   "base_commit_sha": "95a89e08f201669595f8cd357371950d61c71a6e",
   "prompts": {},
+  "sessions": {
+    "s_acf23497fda065": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02b603a6-23ce-4247-802a-2bd8ddd3f65e",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    }
+  },
   "attestation_metadata": {},
   "remote_transcripts": {}
 }
