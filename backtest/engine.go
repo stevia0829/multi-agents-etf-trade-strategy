@@ -186,13 +186,13 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 	}
 
 	// 用基准 ETF（510300）的历史 K 线来确定有效交易日序列。
-	// 按区间日数 × 1.5 推算所需 days（日历→交易日冗余充足，不再固定 1500 被打爆）。
-	needDays := int(end.Sub(start).Hours()/24)*3/2 + 200
+	// 按区间日数推算所需交易日（252/365 ≈ 0.69 换算 + 冗余 100）。
+	needDays := int(end.Sub(start).Hours()/24)*252/365 + 100
 	if needDays < 200 {
 		needDays = 200
 	}
-	if needDays > 1500 {
-		needDays = 1500
+	if needDays > 800 {
+		needDays = 800 // API 单次最大 ~800 根，超出会返回空
 	}
 	baseKlines, err := e.DS.GetKLineAsOf("510300", needDays, end)
 	if err != nil || len(baseKlines) == 0 {

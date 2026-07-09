@@ -136,8 +136,24 @@ func (e *EastMoneyDataSource) GetKLineAsOf(code string, days int, asOf time.Time
 	var klines []types.KLine
 	if klines = e.fetchTencentKLine(code, days, asOf); len(klines) == 0 {
 		if klines = e.fetchEastMoneyKLine(code, days, asOf); len(klines) == 0 {
-			return nil, fmt.Errorf("getKLineAsOf %s days=%d asOf=%s: %w",
-				code, days, asOf.Format("2006-01-02"), ErrNoRealData)
+			// 降级重试：大请求可能被 API 限制，拆成更小的 days 再试
+			if days > 400 {
+				half := days / 2
+				k1 := e.fetchTencentKLine(code, half, asOf)
+				k2 := e.fetchEastMoneyKLine(code, half, asOf)
+				if len(k1) > 0 {
+					klines = k1
+				} else if len(k2) > 0 {
+					klines = k2
+				}
+				if len(klines) > 0 {
+					fmt.Printf("  [cache] %s days=%d 降级到 %d 成功 (%d 根)\n", code, days, half, len(klines))
+				}
+			}
+			if len(klines) == 0 {
+				return nil, fmt.Errorf("getKLineAsOf %s days=%d asOf=%s: %w",
+					code, days, asOf.Format("2006-01-02"), ErrNoRealData)
+			}
 		}
 	}
 
