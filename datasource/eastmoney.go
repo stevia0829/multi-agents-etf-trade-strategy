@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +123,9 @@ func (e *EastMoneyDataSource) GetKLine(code string, days int) ([]types.KLine, er
 // GetKLineAsOf 严格只走真实数据源：腾讯前复权 → EastMoney 历史 K 线。
 // 全部失败时直接返回 ErrNoRealData，绝不再返回伪造（mock）K 线。
 // 内置进程级缓存：同 code+asOf 在 TTL 内直接命中，大幅降低回测 API 调用量。
+//
+// 当 days > 320 时自动分块拉取（每块 ≤ 320 根），按日期去重合并。
+// 这解决了大区间回测时 API 返回空的问题。
 func (e *EastMoneyDataSource) GetKLineAsOf(code string, days int, asOf time.Time) ([]types.KLine, error) {
 	cacheKey := fmt.Sprintf("kl:%s:%s:%d", code, asOf.Format("2006-01-02"), days)
 
@@ -134,27 +138,22 @@ func (e *EastMoneyDataSource) GetKLineAsOf(code string, days int, asOf time.Time
 	e.mu.RUnlock()
 
 	var klines []types.KLine
+
+	// 直接尝试原始 days
 	if klines = e.fetchTencentKLine(code, days, asOf); len(klines) == 0 {
 		if klines = e.fetchEastMoneyKLine(code, days, asOf); len(klines) == 0 {
-			// 降级重试：大请求可能被 API 限制，拆成更小的 days 再试
-			if days > 400 {
-				half := days / 2
-				k1 := e.fetchTencentKLine(code, half, asOf)
-				k2 := e.fetchEastMoneyKLine(code, half, asOf)
-				if len(k1) > 0 {
-					klines = k1
-				} else if len(k2) > 0 {
-					klines = k2
-				}
-				if len(klines) > 0 {
-					fmt.Printf("  [cache] %s days=%d 降级到 %d 成功 (%d 根)\n", code, days, half, len(klines))
-				}
-			}
-			if len(klines) == 0 {
-				return nil, fmt.Errorf("getKLineAsOf %s days=%d asOf=%s: %w",
-					code, days, asOf.Format("2006-01-02"), ErrNoRealData)
-			}
+			klines = nil
 		}
+	}
+
+	// 大请求失败 → 分块拉取
+	if len(klines) == 0 && days > 320 {
+		klines = e.fetchChunkedKLine(code, days, asOf)
+	}
+
+	if len(klines) == 0 {
+		return nil, fmt.Errorf("getKLineAsOf %s days=%d asOf=%s: %w",
+			code, days, asOf.Format("2006-01-02"), ErrNoRealData)
 	}
 
 	// 写缓存
@@ -163,6 +162,81 @@ func (e *EastMoneyDataSource) GetKLineAsOf(code string, days int, asOf time.Time
 	e.mu.Unlock()
 
 	return klines, nil
+}
+
+// fetchChunkedKLine 分块拉取 K 线并合并。
+// 把 days 拆成 ≤ 320 根的块，每块以不同 asOf 拉取，按日期去重。
+func (e *EastMoneyDataSource) fetchChunkedKLine(code string, days int, asOf time.Time) []types.KLine {
+	const chunkSize = 300  // 每块 300 根（≤ API 上限）
+	const calendarRatio = 1.5  // 交易日 → 日历日换算
+
+	endDate := asOf
+	if endDate.IsZero() {
+		endDate = time.Now()
+	}
+
+	var merged []types.KLine
+	seen := make(map[string]bool)
+
+	remaining := days
+	currentEnd := endDate
+
+	for remaining > 0 {
+		chunk := chunkSize
+		if remaining < chunk {
+			chunk = remaining
+		}
+
+		var block []types.KLine
+		if block = e.fetchTencentKLine(code, chunk, currentEnd); len(block) == 0 {
+			block = e.fetchEastMoneyKLine(code, chunk, currentEnd)
+		}
+		if len(block) == 0 {
+			// 再试更小的块
+			if block = e.fetchTencentKLine(code, 120, currentEnd); len(block) == 0 {
+				block = e.fetchEastMoneyKLine(code, 120, currentEnd)
+			}
+		}
+
+		if len(block) == 0 {
+			break // 无法获取更多数据，返回已有结果
+		}
+
+		// 去重合并
+		newCount := 0
+		for _, k := range block {
+			key := k.Date.Format("2006-01-02")
+			if !seen[key] {
+				seen[key] = true
+				merged = append(merged, k)
+				newCount++
+			}
+		}
+
+		if newCount == 0 {
+			break // 没有新数据了
+		}
+
+		// 下一块的 end = 当前块最早日期 - 1 天
+		earliest := block[0].Date
+		currentEnd = earliest.AddDate(0, 0, -1)
+		remaining -= len(block)
+	}
+
+	// 按日期排序
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Date.Before(merged[j].Date)
+	})
+
+	if len(merged) > days {
+		merged = merged[len(merged)-days:]
+	}
+
+	if len(merged) > 0 {
+		fmt.Printf("  [cache] %s 分块拉取 days=%d 合并得到 %d 根\n", code, days, len(merged))
+	}
+
+	return merged
 }
 
 // FetchRealtimeQuote 拉取腾讯实时报价（qt.gtimg.cn），用于补全 IOPV / 溢价率。
