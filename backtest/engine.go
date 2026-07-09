@@ -312,6 +312,13 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		default:
 		}
 
+		// 进度显示（每 20 天打印一行，防止用户以为卡死）
+		if di%20 == 0 {
+			fmt.Printf("  [%s] 进度 %d/%d (%.0f%%) %s\n",
+				e.Variant, di, len(dates), float64(di)/float64(len(dates))*100,
+				d.Format("01-02"))
+		}
+
 		// ── 聚宽对齐模式：直接调 RotationAgent，按聚宽口径满仓持有 rank[0] ──────
 		// 旁路 Screener 的所有外围装饰（dedupBySector / RuleBasedDecision / PositionCap）。
 		// 聚宽口径：MinScore=0（剔除负分）、MaxScore=6 + 1.1 倍过热门槛、不做板块去重、满仓 100%。

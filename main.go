@@ -443,7 +443,7 @@ func runBacktest(startStr, endStr, dateStr string, step, hold, maxSamples int, v
 		eng.Variant = v
 		eng.EntryNextOpen = nextOpen
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
 		res, err := eng.Run(ctx, start, end, step)
 		if err != nil {
