@@ -195,14 +195,24 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 		needDays = 800 // API 单次最大 ~800 根，超出会返回空
 	}
 	baseKlines, err := e.DS.GetKLineAsOf("510300", needDays, end)
-	if err != nil || len(baseKlines) == 0 {
-		return nil, fmt.Errorf("load benchmark klines: %v", err)
-	}
 
 	dates := make([]time.Time, 0)
-	for _, k := range baseKlines {
-		if !k.Date.Before(start) && !k.Date.After(end) {
-			dates = append(dates, k.Date)
+	if err == nil && len(baseKlines) > 0 {
+		// 有基准数据 → 用真实交易日
+		for _, k := range baseKlines {
+			if !k.Date.Before(start) && !k.Date.After(end) {
+				dates = append(dates, k.Date)
+			}
+		}
+	} else {
+		// 基准数据拉不到 → 算法生成交易日（跳过周末，近似处理）
+		fmt.Printf("  [%s] 基准数据拉取失败，算法生成交易日\n", e.Variant)
+		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+			wd := d.Weekday()
+			if wd == time.Saturday || wd == time.Sunday {
+				continue
+			}
+			dates = append(dates, d)
 		}
 	}
 	if len(dates) < 2 {
