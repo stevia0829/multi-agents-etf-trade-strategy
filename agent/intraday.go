@@ -585,8 +585,10 @@ func FormatIntradayCLI(a *types.IntradayAnalysis) string {
 		b.WriteString(fmt.Sprintf("   当前 %.3f  涨跌 %.2f%%  vsMA5 %.2f%%  趋势%s\n",
 			s.Price, s.ChangePct, s.VsMA5*100, trendCn(s.RecentTrend)))
 		if s.EntryPrice > 0 {
-			b.WriteString(fmt.Sprintf("   入场 %.3f(距入场 %+.2f%%)  止损 %.3f(距止损 %+.2f%%)  止盈 %.3f\n",
-				s.EntryPrice, s.DistToEntry*100, s.StopLoss, s.DistToStop*100, s.TakeProfit))
+			b.WriteString(fmt.Sprintf("   🟢 入场 %.3f (距入场 %+.2f%%)\n",
+				s.EntryPrice, s.DistToEntry*100))
+			b.WriteString(fmt.Sprintf("   🛑 止损 %.3f (距止损 %+.2f%%)   🎯 止盈 %.3f\n",
+				s.StopLoss, s.DistToStop*100, s.TakeProfit))
 		}
 		// 跨报告上下文：集合竞价复核结论 + 距上次盯盘涨跌 + 跨刷新趋势
 		var chips []string

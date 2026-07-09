@@ -294,18 +294,19 @@ func writeFinal(b *strings.Builder, f *types.FinalDecision) {
 	}
 	b.WriteString(fmt.Sprintf("| **综合** |  |  |  | **%.2f** |\n\n", f.OverallScore))
 
-	b.WriteString("**操作建议**\n\n")
-	b.WriteString("| 项目 | 数值 |\n|---|---|\n")
-	b.WriteString(fmt.Sprintf("| 建议 | `%s` |\n", f.Recommendation))
-	b.WriteString(fmt.Sprintf("| 入场 | %.3f |\n", f.EntryPrice))
-	b.WriteString(fmt.Sprintf("| 止损 | %.3f |\n", f.StopLoss))
-	b.WriteString(fmt.Sprintf("| 止盈 | %.3f |\n", f.TakeProfit))
+	b.WriteString("**交易价位（风险纪律）**\n\n")
+	b.WriteString(fmt.Sprintf("> 🟢 **入场价** `%.3f`\n", f.EntryPrice))
+	b.WriteString(fmt.Sprintf("> 🛑 **止损价** `%.3f`　—— 跌破即平仓，止损不可下移\n", f.StopLoss))
+	b.WriteString(fmt.Sprintf("> 🎯 **止盈价** `%.3f`　—— 到位分批止盈\n", f.TakeProfit))
 	if f.EntryPrice > 0 {
 		risk := f.EntryPrice - f.StopLoss
 		if risk <= 0 {
 			risk = 1e-6
 		}
-		b.WriteString(fmt.Sprintf("| 盈亏比 | 1 : %.2f |\n", (f.TakeProfit-f.EntryPrice)/risk))
+		b.WriteString(fmt.Sprintf("> 📊 盈亏比 `1 : %.2f`　｜　📌 建议 **`%s`**\n",
+			(f.TakeProfit-f.EntryPrice)/risk, f.Recommendation))
+	} else {
+		b.WriteString(fmt.Sprintf("> 📌 建议 **`%s`**\n", f.Recommendation))
 	}
 	b.WriteString("\n")
 	if f.Reasoning != "" {

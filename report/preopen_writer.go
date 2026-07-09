@@ -77,9 +77,8 @@ func BuildPreOpenMarkdown(a *types.PreOpenAnalysis) string {
 	}
 	b.WriteString("\n")
 
-	// 调整后价位
-	b.WriteString("## 三、调整后入场 / 止损 / 止盈\n\n")
-	b.WriteString("| 名称 | 代码 | 复核结论 | 调整入场 | 止损 | 止盈 | 盈亏比 |\n|---|---|---|---|---|---|---|\n")
+	// 调整后价位：每只标的一个 callout 块，止损/止盈独占一行更醒目
+	b.WriteString("## 三、调整后价位（入场 / 止损 / 止盈）\n\n")
 	for _, s := range a.Snapshots {
 		ratio := "—"
 		if s.AdjEntry > 0 && s.AdjStopLoss > 0 && s.AdjTakeProf > 0 {
@@ -88,14 +87,16 @@ func BuildPreOpenMarkdown(a *types.PreOpenAnalysis) string {
 				ratio = fmt.Sprintf("1 : %.2f", (s.AdjTakeProf-s.AdjEntry)/risk)
 			}
 		}
-		entry := fmt.Sprintf("%.4f", s.AdjEntry)
+		entry := fmt.Sprintf("`%.4f`", s.AdjEntry)
 		if s.AdjEntry <= 0 {
 			entry = "—"
 		}
-		b.WriteString(fmt.Sprintf("| %s | `%s` | `%s` | %s | %.4f | %.4f | %s |\n",
-			s.ETFName, s.ETFCode, s.Verdict, entry, s.AdjStopLoss, s.AdjTakeProf, ratio))
+		b.WriteString(fmt.Sprintf("### %s（`%s`）— 复核结论 `%s`\n\n",
+			s.ETFName, s.ETFCode, s.Verdict))
+		b.WriteString(fmt.Sprintf("> 🟢 **调整入场** %s\n", entry))
+		b.WriteString(fmt.Sprintf("> 🛑 **止损** `%.4f`　｜　🎯 **止盈** `%.4f`　｜　📊 盈亏比 `%s`\n\n",
+			s.AdjStopLoss, s.AdjTakeProf, ratio))
 	}
-	b.WriteString("\n")
 
 	// 减仓 / 平仓建议（仅当存在 reduce verdict 时输出）
 	if hasReduceSnapshot(a) {
