@@ -26,3 +26,12 @@ report/strategy.py
 *.swp
 .ttadk/
 specs/doc_export/
+
+# IDE / 工具链
+.claude/
+.coco/
+.trae/
+.trae-html-share-packages/
+.mcp.json
+ai-plugin.json
+ai-plugin-lock.json
