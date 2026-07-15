@@ -78,6 +78,8 @@ type Result struct {
 	BenchmarkReturn float64       `json:"benchmark_return"` // 基准 buy & hold 收益
 	Alpha           float64       `json:"alpha"`            // 策略 - 基准
 	CostPerSide     float64       `json:"cost_per_side"`    // 单边成本（已扣除）
+	EntryNextOpen   bool          `json:"entry_next_open"`  // true=T 日信号、T+1 开盘成交
+	MinHistoryBars  int           `json:"min_history_bars"` // ETF 进入排名前的最少历史 K 线数
 }
 
 type Bucket struct {
@@ -110,27 +112,31 @@ type Engine struct {
 	// Benchmark 基准 ETF 代码，默认 510300（沪深300ETF），用于 buy&hold 对比 + Alpha。
 	Benchmark string
 	// EntryNextOpen 入场时机开关（消除前视偏差）：
-	//   false（默认）= 信号日收盘价入场（历史行为，保留以复现旧回测）；
-	//   true         = 次日开盘价入场（信号 T 日收盘产生 → T+1 开盘执行，无 lookahead）。
+	//   false = 信号日收盘价入场（历史行为，仅用于复现旧回测）；
+	//   true（默认）= 次日开盘价入场（信号 T 日收盘产生 → T+1 开盘执行，无 lookahead）。
 	// 机理：GetKLineAsOf 的 asOf 含当日，Screener/Rotation 在 AsOf=d 时已看到 d 的收盘；
 	//       若又用 indexOnOrAfter(d).Close 入场，等于"看了今日收盘才在今日收盘买入"。
 	// 开关开时改用 indexAfter(d).Open；末日（最后样本）不开新仓，因其次日开盘已落在回测窗外、
 	// 同迭代 force-exit 会在入场前平仓。force-exit 本身不动（只对末日之前入场的仓位生效，时序自洽）。
 	EntryNextOpen bool
+	// MinHistoryBars 仅用于回测候选资格，默认 60 个交易日；实时 advice 不受影响。
+	MinHistoryBars int
 }
 
 func NewEngine(ds datasource.ETFDataSource) *Engine {
 	return &Engine{
-		DS:          ds,
-		Screener:    agent.NewScreenerAgent(ds),
-		Regime:      agent.NewRegimeAgent(ds),
-		MoneyFlow:   agent.NewMoneyFlowAgent(ds),
-		HoldDays:    5,
-		Variant:     "v3",
-		V2Config:    agent.DefaultV2FilterConfig(),
-		state:       agent.NewV2State(),
-		CostPerSide: 0.0008,
-		Benchmark:   "510300",
+		DS:             ds,
+		Screener:       agent.NewScreenerAgent(ds),
+		Regime:         agent.NewRegimeAgent(ds),
+		MoneyFlow:      agent.NewMoneyFlowAgent(ds),
+		HoldDays:       5,
+		Variant:        "v3",
+		V2Config:       agent.DefaultV2FilterConfig(),
+		state:          agent.NewV2State(),
+		CostPerSide:    0.0008,
+		Benchmark:      "510300",
+		EntryNextOpen:  true,
+		MinHistoryBars: 60,
 	}
 }
 
@@ -161,6 +167,14 @@ func NewEngine(ds datasource.ETFDataSource) *Engine {
 //   - step 参数被忽略
 func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Result, error) {
 	_ = step // 保留参数兼容，状态化每日回测忽略 step
+
+	// 回测使用成熟期过滤，避免新上市 ETF 仅凭上市初期的短样本高波动进入排名。
+	// 该参数不属于风险因子，不改变分数；只约束历史数据资格。
+	if e.Screener != nil && e.Screener.Rotation != nil {
+		p := e.Screener.Rotation.Params
+		p.MinHistoryBars = e.MinHistoryBars
+		e.Screener.Rotation.Params = p
+	}
 
 	// Variant 注入：v3p1 在 v3 主流程之上启用 P1-1（双周期动量）+ P1-2（凸性调整）
 	// 默认开启 RegimeAwareP1：仅 bear/risk_off 时真正生效，bull/neutral 时回退到 P0 行为。
@@ -224,14 +238,16 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 	}
 
 	res := &Result{
-		StartDate:     dates[0],
-		EndDate:       dates[len(dates)-1],
-		HoldDays:      0, // 状态化模式下记平均持仓天数，summarize 阶段补
-		ByReco:        map[string]Bucket{},
-		ByRegime:      map[string]Bucket{},
-		BySector:      map[string]Bucket{},
-		CostPerSide:   e.CostPerSide,
-		BenchmarkCode: e.Benchmark,
+		StartDate:      dates[0],
+		EndDate:        dates[len(dates)-1],
+		HoldDays:       0, // 状态化模式下记平均持仓天数，summarize 阶段补
+		ByReco:         map[string]Bucket{},
+		ByRegime:       map[string]Bucket{},
+		BySector:       map[string]Bucket{},
+		CostPerSide:    e.CostPerSide,
+		BenchmarkCode:  e.Benchmark,
+		EntryNextOpen:  e.EntryNextOpen,
+		MinHistoryBars: e.MinHistoryBars,
 	}
 
 	// 持仓状态
@@ -340,6 +356,7 @@ func (e *Engine) Run(ctx context.Context, start, end time.Time, step int) (*Resu
 			rot.Params.MaxScore = 6
 			rot.Params.ScoreThresholdMultiplier = 1.1
 			rot.Params.MDays = 21
+			rot.Params.MinHistoryBars = e.MinHistoryBars
 			rot.Params.TopN = 0 // 0 = 不截断，保留全部排名
 
 			// P1: 多窗口动量融合（仅 v3opt）
@@ -956,6 +973,11 @@ func BuildMarkdown(r *Result) string {
 	b.WriteString(fmt.Sprintf("- 样本数: %d（其中实际建仓：%d）\n", r.Total, r.Wins+r.Losses))
 	b.WriteString(fmt.Sprintf("- 单边成本: %.4f（已扣除手续费+滑点）；基准: `%s`\n",
 		r.CostPerSide, defaultStr(r.BenchmarkCode, "510300")))
+	entryMode := "信号日收盘（仅用于旧口径复现）"
+	if r.EntryNextOpen {
+		entryMode = "T+1 次日开盘（无前视）"
+	}
+	b.WriteString(fmt.Sprintf("- 成交口径: **%s**；ETF 成熟期: **至少 %d 根日 K**\n", entryMode, r.MinHistoryBars))
 	b.WriteString("\n## 一、整体表现\n\n")
 	b.WriteString("| 指标 | 数值 |\n|---|---|\n")
 	b.WriteString(fmt.Sprintf("| 胜率 | %.2f%% |\n", r.WinRate*100))

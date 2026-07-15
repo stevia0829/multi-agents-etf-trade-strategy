@@ -34,7 +34,7 @@ func main() {
 		btHold      = flag.Int("bt-hold", 5, "backtest 持有期（已废弃，实际由信号驱动持仓）")
 		btMax       = flag.Int("bt-max", 60, "backtest 最大样本数")
 		btVariant   = flag.String("bt-variant", "both", "回测变体：v3 / v3v2 / v3p1 / v3opt / both / both_p1 / both_opt / both_lo / joinquant")
-		btNextOpen  = flag.Bool("bt-next-open", false, "回测入场改用次日开盘价（消除前视偏差）；默认关=维持信号日收盘入场。单变体模式生效；both_lo 变体忽略此 flag 自带 A/B")
+		btNextOpen  = flag.Bool("bt-next-open", true, "回测使用次日开盘价成交（默认开启，消除前视偏差）；传入 false 仅用于复现旧口径。both_lo 变体忽略此 flag 自带 A/B")
 	)
 	flag.Parse()
 

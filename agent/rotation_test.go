@@ -16,6 +16,13 @@ func (m *mockDS) ListAllETFs() ([]types.ETF, error) { return nil, nil }
 func (m *mockDS) GetKLine(code string, days int) ([]types.KLine, error) {
 	return m.GetKLineAsOf(code, days, time.Time{})
 }
+
+// shortHistoryDS 模拟刚上市 ETF：无论请求多少，只返回 30 根历史数据。
+type shortHistoryDS struct{ mockDS }
+
+func (m *shortHistoryDS) GetKLineAsOf(code string, days int, asOf time.Time) ([]types.KLine, error) {
+	return m.mockDS.GetKLineAsOf(code, 30, asOf)
+}
 func (m *mockDS) GetKLineAsOf(code string, days int, asOf time.Time) ([]types.KLine, error) {
 	if asOf.IsZero() {
 		asOf = time.Now()
@@ -78,6 +85,19 @@ func TestRotation_DefaultParams(t *testing.T) {
 	}
 	if p.ScoreThresholdMultiplier != 1.1 {
 		t.Fatalf("default multiplier should be 1.1, got %v", p.ScoreThresholdMultiplier)
+	}
+}
+
+func TestRotation_MinHistoryBarsFiltersNewETF(t *testing.T) {
+	ag := NewRotationAgent(&shortHistoryDS{})
+	ag.Params.MinHistoryBars = 60
+
+	cands, err := ag.Rank(context.Background())
+	if err != nil {
+		t.Fatalf("rank: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Fatalf("expected short-history ETFs to be filtered, got %d", len(cands))
 	}
 }
 

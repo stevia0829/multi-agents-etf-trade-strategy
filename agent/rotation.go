@@ -104,7 +104,11 @@ var Strategy3Pool = []struct {
 
 // RotationParams 对应 strategy.py 中的策略 3 参数。
 type RotationParams struct {
-	MDays                    int     // 动量参考天数 (g.m_days, default 21)
+	MDays int // 动量参考天数 (g.m_days, default 21)
+	// MinHistoryBars 是标的进入排名前必须具备的最少日 K 数。
+	// 机理：新上市 ETF 的短历史容易被上市初期高波动放大；回测设为 60 可降低事后选池偏差。
+	// 实时 advice 默认 0（不改变现有候选行为），由回测引擎显式启用。
+	MinHistoryBars           int
 	MaxScore                 float64 // 动量过滤上限 (g.max_score, default 6)
 	MinScore                 float64 // 动量过滤下限 (g.min_score, default 0)
 	ScoreThresholdMultiplier float64 // 高分情形下日间增长阈值 (g.score_threshold_multiplier, default 1.1)
@@ -366,6 +370,9 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 
 	// 数据需求：默认 m+1；若开启双动量需要 LongLookback+1
 	need := p.MDays + 1
+	if p.MinHistoryBars > need {
+		need = p.MinHistoryBars
+	}
 	if useDualMomentum && p.LongLookback+1 > need {
 		need = p.LongLookback + 1
 	}
@@ -390,7 +397,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 		default:
 		}
 		klines, err := a.DS.GetKLineAsOf(e.Code, need, a.AsOf)
-		if err != nil || len(klines) < minWindow {
+		if err != nil || len(klines) < minWindow || (p.MinHistoryBars > 0 && len(klines) < p.MinHistoryBars) {
 			continue
 		}
 

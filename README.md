@@ -2,7 +2,7 @@
 
 A 股 ETF 开盘前多 Agent 分析系统。基于 [eino](https://github.com/cloudwego/eino) multi-agent 编排思想构建：以"21 日加权动量轮动"作为核心打分器，叠加技术面、消息面、宏观、资金面、跨境联动 5 路 Agent，并通过 MemoryAgent 注入长期记忆；最后由 FinalAgent 模拟一场"投资委员会"加权融合，输出**次日开盘前的交易决策**（标的 / 入场价 / 止损 / 止盈 / 仓位上限），并从 Top5 中精选 1~2 支推荐买入。
 
-LLM 统一使用 **DeepSeek (deepseek-chat)**，通过 OpenAI 兼容协议调用；具备**主备模型 + 静态 JSON 兜底**的三级降级能力，离线 / 网络故障也能跑出规则版决策。
+LLM 统一走 **OpenAI 兼容协议**，默认用 **DeepSeek (deepseek-chat)**，但**模型可任意替换**——内置 DeepSeek / Moonshot / 豆包 / 通义 / OpenAI 及 `custom`（任意自建网关）6 类 provider，无需改代码，一个环境变量即可切换主模型与备链；并具备**主备模型 + 静态 JSON 兜底**的三级降级能力，离线 / 网络故障也能跑出规则版决策。
 
 ---
 
@@ -24,7 +24,7 @@ LLM 统一使用 **DeepSeek (deepseek-chat)**，通过 OpenAI 兼容协议调用
   - 短期 = `types.AgentState`（fan-out 上下文）
   - 中期 = `current_holds.json`（OpenClaw 写、advice / preopen 读）
   - 长期 = `report/*.md`（MemoryAgent 读最近 5 份摘要为 patterns / warnings）
-- **D · 数据源 & LLM 基础设施**：腾讯财经 K 线主源（qfq）+ 东方财富备源 / 资金流，LLM 走 DeepSeek (deepseek-chat) OpenAI 兼容协议，并由 `llm/resilient.go` 完成"重试 / 降级链 / 静态 fallback"——保证在网络抖动 / 模型限流时也能离线跑出规则版决策。
+- **D · 数据源 & LLM 基础设施**：腾讯财经 K 线主源（qfq）+ 东方财富备源 / 资金流，LLM 走 OpenAI 兼容协议（默认 DeepSeek，**可经环境变量一键替换为 Moonshot / 豆包 / 通义 / OpenAI / 任意自建网关**），并由 `llm/resilient.go` 完成"重试 / 降级链 / 静态 fallback"——保证在网络抖动 / 模型限流时也能离线跑出规则版决策。
 
 > 配套 Cron 表达式参考（OpenClaw 上托管，自动注入持仓参数）：
 >
@@ -45,11 +45,46 @@ LLM 统一使用 **DeepSeek (deepseek-chat)**，通过 OpenAI 兼容协议调用
 ### 1. 准备环境
 
 - Go 1.21+
-- DeepSeek API Key（项目内置默认值，可直接跑）；如需替换：
+- 一个 LLM API Key（**模型可替换**，不局限于 DeepSeek）。
+
+所有 Agent 都通过统一 `llm.Client` 接口走 OpenAI 兼容协议，内置 6 类 provider 可直接切换，**无需改代码**。默认主模型 DeepSeek，其余作备链；填好哪个 provider 的 Key，就启用哪个：
+
+| Provider | 默认 baseURL | 默认模型 | API Key 来源 |
+|---|---|---|---|
+| `deepseek`（默认） | `https://api.deepseek.com/v1` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| `moonshot`（Kimi） | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | `MOONSHOT_API_KEY` |
+| `doubao`（豆包） | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-1-5-pro-32k` | `DOUBAO_API_KEY` |
+| `qwen`（通义） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | `QWEN_API_KEY` |
+| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| `custom` | — | — | `CUSTOM_API_KEY` |
+
+> `custom` 通道可接入**任意 OpenAI Chat Completions 兼容的厂商 / 自建网关**，需额外设置 `CUSTOM_BASE_URL` 与 `CUSTOM_MODEL`。
+
+**① 配 Key（两种方式任选其一）：**
+
+环境变量（最快）：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
+
+或写进 `config/secrets.json`（已 gitignore 不入库，模板见 `config/secrets.example.json`）；字段留空会自动回落到同名 OS 环境变量。
+
+**② 切换主模型 / 备链（零代码改动）：**
+
+```bash
+# 主模型换成 Kimi，备链 deepseek → 豆包 → 通义
+export LLM_PRIMARY=moonshot
+export LLM_FALLBACKS=deepseek,doubao,qwen
+
+# 接入自建网关当主模型
+export CUSTOM_BASE_URL=https://your-gateway/v1
+export CUSTOM_MODEL=your-model-name
+export CUSTOM_API_KEY=sk-xxxx
+export LLM_PRIMARY=custom LLM_FALLBACKS=deepseek
+```
+
+也可用 `<PROVIDER>_MODEL` / `<PROVIDER>_BASE_URL` 单独覆盖某个 provider 的模型名或端点（例如把 DeepSeek 换成 `deepseek-reasoner`）。primary 缺 Key 时会自动把第一个配好 Key 的备模型提升为主模型，所以"只配了备模型 Key"也能直接跑。
 
 ### 2. 一键出今日报告（默认 advice 模式）
 
@@ -77,6 +112,7 @@ go run . [flags]
 | `--bt-step` | `5` | 采样间隔（**状态化模式下已忽略**，保留兼容） |
 | `--bt-hold` | `5` | 持有期（**状态化模式下已忽略**，由信号反转决定） |
 | `--bt-max` | `60` | 最大样本数；`0` = 不限。**状态化模式下表示截尾交易日数** |
+| `--bt-next-open` | `true` | 默认按 T+1 开盘成交，避免使用 T 日收盘数据后又按同一收盘价成交；`false` 仅用于旧口径复现 |
 | `--bt-variant` | `both` | 回测变体：`v3`（多 Agent 主流程） / `v3v2`（叠加 V2 4 闸门） / `both`（A/B 对比） / `joinquant`（裸聚宽对照） |
 
 ### 4. 常用命令示例
@@ -356,8 +392,8 @@ eino-muti-etf-strategy/
 │   └── eastmoney.go                # K 线 + ETF 池 (腾讯/东财/mock)
 ├── llm/
 │   ├── client.go                   # LLM 客户端接口
-│   ├── deepseek.go                 # DeepSeek (OpenAI 兼容协议)
-│   ├── factory.go                  # 配置 → 客户端
+│   ├── deepseek.go                 # OpenAI 兼容通用客户端（6 类 provider 复用）
+│   ├── factory.go                  # 多 provider 配置 → 主备 Resilient Client
 │   └── resilient.go                # 主备 + 静态 fallback
 ├── backtest/
 │   └── engine.go                   # 历史胜率回测 (规则版决策)
