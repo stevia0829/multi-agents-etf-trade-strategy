@@ -1,9 +1,31 @@
+agent/rotation.go
+  s_578a40a6ef1b61::t_7133435fb7a797 107-111,373-375,400
+agent/rotation_test.go
+  s_578a40a6ef1b61::t_b48c1d498f944a 19-25,91-103
+backtest/engine.go
+  s_578a40a6ef1b61::t_2b0393d403f1f8 81-82,115-116,122-123,128-139,171-178,241-250,359,976-980
+docs/CHANGELOG-strategy.md
+  s_578a40a6ef1b61::t_08ca7cec1d40ab 740-750
+jq/quant.py
+  s_578a40a6ef1b61::t_8485462d48dd69 1-538
+main.go
+  s_578a40a6ef1b61::t_88cb10957e4165 37
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.4",
+  "git_ai_version": "1.6.10",
   "base_commit_sha": "82b2cba933744e05a99f62de925c951abd3c2f55",
   "prompts": {},
+  "sessions": {
+    "s_578a40a6ef1b61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f6a-d96d-7d53-8fe1-d35dfd28020f",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    }
+  },
   "attestation_metadata": {},
   "remote_transcripts": {}
 }
