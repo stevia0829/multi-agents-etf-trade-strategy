@@ -453,6 +453,18 @@ go run . --mode=backtest --bt-start=2026-01-01 --bt-end=2026-06-09 --bt-variant=
 go run . --mode=backtest --bt-start=2026-01-01 --bt-end=2026-06-09 --bt-variant=both --bt-max=0
 ```
 
+如需绕过根目录诊断脚本、直接验证当前主池的聚宽原版21日轮动，可使用独立工具：
+
+```bash
+# 对齐实时 advice：ETF 上市后具备21日数据即可参与
+go run ./cmd/rotation-backtest --start=2024-01-01 --end=2026-07-15 --min-history=0
+
+# 长样本可信性对照：至少60根日K后才允许进入排名
+go run ./cmd/rotation-backtest --start=2024-01-01 --end=2026-07-15 --min-history=60
+```
+
+工具读取当前 `Strategy3Pool`（目前回退为聚宽原版62只）、使用单21日聚宽权重公式、激进过热过滤和机械Top1满仓轮动，同时输出 Markdown 与 JSON。默认按T日收盘信号、T+1开盘成交；`--next-open=false` 仅用于复现旧收盘口径。
+
 输出 Markdown 报告含 12+ 个风险/基准/费率指标：胜率、Sharpe、Sortino、Calmar、Profit Factor、最大回撤、年化收益、Alpha vs 510300 等。完整指标定义见 [docs/CHANGELOG-strategy.md#p0-3-回测引擎补齐风险基准费率指标](docs/CHANGELOG-strategy.md)。
 
 ```

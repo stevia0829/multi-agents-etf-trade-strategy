@@ -13,8 +13,8 @@ func mkKlines(closes []float64) []types.KLine {
 	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i, c := range closes {
 		out[i] = types.KLine{
-			Date:   base.AddDate(0, 0, i),
-			Open:   c, Close: c, High: c, Low: c, Volume: 1000,
+			Date: base.AddDate(0, 0, i),
+			Open: c, Close: c, High: c, Low: c, Volume: 1000,
 		}
 	}
 	return out
@@ -72,4 +72,24 @@ func TestMomentumScore_BadParam(t *testing.T) {
 	if score != 0 {
 		t.Fatalf("mDays<=1 should return 0, got %v", score)
 	}
+}
+
+func TestMomentumScore_MatchesJoinQuantPolyfitWeights(t *testing.T) {
+	// 期望值由聚宽原版等价的 numpy.polyfit(x, log(prices), 1, w=linspace(1,2,21))
+	// 计算；该非完全线性序列可以区分 w 与 w² 两种回归口径。
+	closes := []float64{
+		1.00, 1.02, 1.01, 1.04, 1.03, 1.07, 1.06,
+		1.10, 1.09, 1.13, 1.12, 1.16, 1.15, 1.20,
+		1.18, 1.23, 1.22, 1.27, 1.25, 1.31, 1.29,
+	}
+	score, ann, r2 := MomentumScore(mkKlines(closes), 21)
+	assertNear := func(name string, got, want float64) {
+		t.Helper()
+		if math.Abs(got-want) > 1e-10 {
+			t.Fatalf("%s=%0.15f, want %0.15f", name, got, want)
+		}
+	}
+	assertNear("score", score, 29.14087848599015)
+	assertNear("annualized", ann, 29.862151209067203)
+	assertNear("r2", r2, 0.9758465919609285)
 }

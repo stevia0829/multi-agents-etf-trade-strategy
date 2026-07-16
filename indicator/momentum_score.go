@@ -11,7 +11,7 @@ import (
 // 来源：strategy.py 中 g.etf_pool_3 + g.m_days(=21) 的动量评分逻辑。
 // 思路：
 //  1. 取最近 m_days 个收盘价 prices；
-//  2. 对 log(prices) 做加权一次多项式回归 (权重 np.linspace(1, 2, n))，得到 slope；
+//  2. 对 log(prices) 做加权一次多项式回归 (np.polyfit 的 w=np.linspace(1, 2, n))，得到 slope；
 //  3. 年化收益率 annualized = exp(slope * 250) - 1；
 //  4. 加权 R²：1 - SSE_w / SST_w，其中：
 //     SSE_w = Σ wᵢ (yᵢ - ŷᵢ)²
@@ -19,6 +19,7 @@ import (
 //  5. score = annualized * R²。
 //
 // 与聚宽 get_etf_rank / moment_rank 的口径已对齐：
+//   - np.polyfit 的 w 乘在未平方残差上，因此回归正规方程使用 w²
 //   - SST_w 中的 ȳ 使用 Σy/n（未加权均值），与 numpy 的 np.mean(y) 一致
 //   - R² 不做 0~1 的 clamp，允许负值（震荡序列时 score 会被进一步压低，排名更靠后）
 //
@@ -51,16 +52,20 @@ func MomentumScore(klines []types.KLine, mDays int) (score, annualized, r2 float
 		}
 	}
 
+	// 聚宽原版使用 np.polyfit(x, y, 1, w=weights)。numpy 的 w 作用于
+	// 未平方残差，等效于正规方程中使用 weights²；R² 仍沿用原版的一次 weights。
+	// 这个混合口径看似不标准，但必须保留才能逐值复现聚宽排名。
 	// 加权线性回归: y = a*x + b
 	var sumW, sumWX, sumWY, sumWXX, sumWXY float64
 	for i := 0; i < mDays; i++ {
 		x := float64(i)
 		y := closes[i]
-		sumW += w[i]
-		sumWX += w[i] * x
-		sumWY += w[i] * y
-		sumWXX += w[i] * x * x
-		sumWXY += w[i] * x * y
+		fitWeight := w[i] * w[i]
+		sumW += fitWeight
+		sumWX += fitWeight * x
+		sumWY += fitWeight * y
+		sumWXX += fitWeight * x * x
+		sumWXY += fitWeight * x * y
 	}
 	denom := sumW*sumWXX - sumWX*sumWX
 	if denom == 0 {

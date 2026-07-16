@@ -81,25 +81,28 @@ var Strategy3Pool = []struct {
 	{"510880", "红利ETF华泰柏瑞", "宽基"},
 	{"511090", "30年国债ETF鹏扬", "债券"},
 
-	// === 2026-06 补充：腾讯财经接口 (qt.gtimg.cn) 校验过名称的新增标的 ===
-	{"588000", "科创50ETF华夏", "宽基"},
-	{"159949", "创业板50ETF华安", "宽基"},
-	{"560610", "A500ETF招商", "宽基"},
-	{"159338", "中证A500ETF国泰", "宽基"},
-	{"512170", "医疗ETF华宝", "医药"},
-	{"159770", "机器人ETF天弘", "科技"},
-	{"159892", "恒生医药ETF华夏", "港股"},
-	{"513880", "日经225ETF华安", "海外"},
-	{"159509", "纳指科技ETF景顺", "海外"},
-	{"515000", "科技ETF华宝", "科技"},
-	{"515650", "消费50ETF富国", "消费"},
-	{"159996", "家电ETF国泰", "消费"},
-	{"515260", "电子ETF华宝", "科技"},
-	{"515700", "新能源车ETF平安", "新能源"},
-	{"515030", "新能源车ETF华夏", "新能源"},
-	{"159792", "港股通互联网ETF富国", "港股"},
-	{"588200", "科创芯片ETF嘉实", "科技"},
-	{"588160", "科创新材料ETF南方", "材料"},
+	// === 观察池（2026-07-16 暂停参与排名）===
+	// 2024-01~2026-07 聚宽同口径 A/B：62只原池累计收益/Sharpe/MDD 均优于扩充80只。
+	// 激进过热过滤下，新增标的可能触发全局过热分支并挤出正常候选；在完成上市成熟期、
+	// 流动性、同指数去重和逐组增量回测前，先保留代码但不加入 Strategy3Pool。
+	// {"588000", "科创50ETF华夏", "宽基"},
+	// {"159949", "创业板50ETF华安", "宽基"},
+	// {"560610", "A500ETF招商", "宽基"},
+	// {"159338", "中证A500ETF国泰", "宽基"},
+	// {"512170", "医疗ETF华宝", "医药"},
+	// {"159770", "机器人ETF天弘", "科技"},
+	// {"159892", "恒生医药ETF华夏", "港股"},
+	// {"513880", "日经225ETF华安", "海外"},
+	// {"159509", "纳指科技ETF景顺", "海外"},
+	// {"515000", "科技ETF华宝", "科技"},
+	// {"515650", "消费50ETF富国", "消费"},
+	// {"159996", "家电ETF国泰", "消费"},
+	// {"515260", "电子ETF华宝", "科技"},
+	// {"515700", "新能源车ETF平安", "新能源"},
+	// {"515030", "新能源车ETF华夏", "新能源"},
+	// {"159792", "港股通互联网ETF富国", "港股"},
+	// {"588200", "科创芯片ETF嘉实", "科技"},
+	// {"588160", "科创新材料ETF南方", "材料"},
 }
 
 // RotationParams 对应 strategy.py 中的策略 3 参数。
@@ -330,10 +333,11 @@ func NewRotationAgent(ds datasource.ETFDataSource) *RotationAgent {
 // Rank 拉取 etf_pool_3 中每只标的最近 m_days+1 天 K 线，
 // 计算 T 日 + T-1 日 score，按 strategy_3 规则过滤后排序返回。
 //
-// 过滤规则（来自 strategy.py）：
-//   - keep min_score <= score <= max_score
-//   - 若任意标的 score > max_score，则只保留满足
-//     score_T >= score_{T-1} * score_threshold_multiplier 的标的（避免动量见顶）
+// 过滤规则（严格复刻聚宽原版 strategy.py）：
+//   - 无 score > max_score 时：保留 min_score <= score <= max_score；
+//   - 存在 score > max_score 时：若有过热标的满足
+//     score_T >= score_{T-1} * score_threshold_multiplier，则只在这些过热加速标的中排名；
+//   - 若没有过热标的通过加速闸门，则回退到正常分数区间。
 func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 	p := a.Params
 	if p.MDays <= 1 {
@@ -482,34 +486,7 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 		candidates = append(candidates, c)
 	}
 
-	// 1) 区间过滤：只剔除 score < MinScore 的"垃圾"标的；
-	//    对 score > MaxScore 的"过热"标的保留入候选池，由步骤 2 用日间增长门槛再做晋级判定。
-	filtered := candidates[:0]
-	for _, c := range candidates {
-		if c.Score >= p.MinScore {
-			filtered = append(filtered, c)
-		}
-	}
-
-	// 2) 过热门槛（仅当池内存在 score > MaxScore 标的时启用）：
-	//    - 对 Score > MaxScore 的标的，要求 Score >= PrevScore × 1.1 才放行（动量持续加速）；
-	//    - 对 Score <= MaxScore 的标的，正常放行。
-	if hasOverMax && p.ScoreThresholdMultiplier > 0 {
-		again := filtered[:0]
-		for _, c := range filtered {
-			if c.Score > maxScore {
-				if c.HasPrev && c.PrevScore > 0 && c.Score >= c.PrevScore*p.ScoreThresholdMultiplier {
-					again = append(again, c)
-				}
-				continue
-			}
-			again = append(again, c)
-		}
-		// 极端情况下全部被过滤，则放宽回 filtered，保证 pipeline 不空跑
-		if len(again) > 0 {
-			filtered = again
-		}
-	}
+	filtered := filterRotationCandidates(candidates, p.MinScore, maxScore, p.ScoreThresholdMultiplier, hasOverMax)
 
 	// 3) 按 score 降序
 	sort.SliceStable(filtered, func(i, j int) bool {
@@ -548,6 +525,37 @@ func (a *RotationAgent) Rank(ctx context.Context) ([]RotationCandidate, error) {
 		filtered = head
 	}
 	return filtered, nil
+}
+
+// filterRotationCandidates 严格复刻聚宽原版的激进过热过滤。
+// 一旦有 score>maxScore 且通过日间加速闸门的标的，就只保留这些过热赢家；
+// 正常分数候选仅在没有过热赢家通过时作为回退，因而会提高趋势行情的集中度与回撤风险。
+func filterRotationCandidates(candidates []RotationCandidate, minScore, maxScore, multiplier float64, hasOverMax bool) []RotationCandidate {
+	normal := make([]RotationCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Score >= minScore && c.Score <= maxScore {
+			normal = append(normal, c)
+		}
+	}
+	if !hasOverMax || multiplier <= 0 {
+		return normal
+	}
+
+	hot := make([]RotationCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Score <= maxScore {
+			continue
+		}
+		// 聚宽原版在拿不到 T-1 分数时直接放行；有 T-1 时只比较 1.1 倍，
+		// 不额外要求 PrevScore>0。
+		if !c.HasPrev || c.Score >= c.PrevScore*multiplier {
+			hot = append(hot, c)
+		}
+	}
+	if len(hot) > 0 {
+		return hot
+	}
+	return normal
 }
 
 // BuildReason 返回轮动入选的人话理由，用于 ScoredETF.Reason 展示。

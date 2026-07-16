@@ -115,8 +115,8 @@ func TestRotation_RankReturnsSorted(t *testing.T) {
 }
 
 func TestStrategy3Pool_NotEmpty(t *testing.T) {
-	if len(Strategy3Pool) < 50 {
-		t.Fatalf("etf pool size seems off: %d", len(Strategy3Pool))
+	if len(Strategy3Pool) != 62 {
+		t.Fatalf("Strategy3Pool应与聚宽原版保持62只，got=%d", len(Strategy3Pool))
 	}
 	seen := map[string]bool{}
 	for _, e := range Strategy3Pool {
@@ -124,5 +124,40 @@ func TestStrategy3Pool_NotEmpty(t *testing.T) {
 			t.Fatalf("duplicate code in pool: %s", e.Code)
 		}
 		seen[e.Code] = true
+	}
+}
+
+func TestFilterRotationCandidates_JoinQuantAggressiveHotBranch(t *testing.T) {
+	candidates := []RotationCandidate{
+		{ETF: types.ETF{Code: "normal"}, Score: 5.5, PrevScore: 5.0, HasPrev: true},
+		{ETF: types.ETF{Code: "hot_pass"}, Score: 8.0, PrevScore: 7.0, HasPrev: true},
+		{ETF: types.ETF{Code: "hot_fail"}, Score: 9.0, PrevScore: 8.5, HasPrev: true},
+	}
+	got := filterRotationCandidates(candidates, 0, 6, 1.1, true)
+	if len(got) != 1 || got[0].ETF.Code != "hot_pass" {
+		t.Fatalf("聚宽激进分支应只保留加速过热标的，got=%+v", got)
+	}
+}
+
+func TestFilterRotationCandidates_FallsBackToNormalRange(t *testing.T) {
+	candidates := []RotationCandidate{
+		{ETF: types.ETF{Code: "normal"}, Score: 5.5, PrevScore: 5.0, HasPrev: true},
+		{ETF: types.ETF{Code: "hot_fail"}, Score: 8.0, PrevScore: 7.8, HasPrev: true},
+		{ETF: types.ETF{Code: "negative"}, Score: -0.1},
+	}
+	got := filterRotationCandidates(candidates, 0, 6, 1.1, true)
+	if len(got) != 1 || got[0].ETF.Code != "normal" {
+		t.Fatalf("无过热标的通过时应回退正常区间，got=%+v", got)
+	}
+}
+
+func TestFilterRotationCandidates_HotWithoutPreviousScorePasses(t *testing.T) {
+	candidates := []RotationCandidate{
+		{ETF: types.ETF{Code: "normal"}, Score: 5.5, HasPrev: true},
+		{ETF: types.ETF{Code: "new_hot"}, Score: 8.0, HasPrev: false},
+	}
+	got := filterRotationCandidates(candidates, 0, 6, 1.1, true)
+	if len(got) != 1 || got[0].ETF.Code != "new_hot" {
+		t.Fatalf("聚宽原版对缺少T-1的过热标的直接放行，got=%+v", got)
 	}
 }

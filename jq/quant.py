@@ -1,11 +1,3 @@
-# 克隆自聚宽文章：https://www.joinquant.com/post/65582
-# 标题：【讨论帖】三驾马车策略-今年涨177%回撤13%五年21倍
-# 作者：烟花三月zy
-
-# 克隆自聚宽文章：https://www.joinquant.com/post/63661
-# 标题：三马v10.2 测试框架
-# 作者：Cibo
-
 """
 ETF 动量轮动策略 (单策略精简版)
 
@@ -125,8 +117,33 @@ def set_strategy_params(context):
         '512800.XSHG',  # 银行ETF
         '510880.XSHG',  # 红利ETF
         '511090.XSHG',  # 30年国债ETF
+
+        # 与 Go advice 的 Strategy3Pool 对齐（2026-06 扩充）
+        '588000.XSHG',  # 科创50ETF华夏
+        '159949.XSHE',  # 创业板50ETF华安
+        '560610.XSHG',  # A500ETF招商
+        '159338.XSHE',  # 中证A500ETF国泰
+        '512170.XSHG',  # 医疗ETF华宝
+        '159770.XSHE',  # 机器人ETF天弘
+        '159892.XSHE',  # 恒生医药ETF华夏
+        '513880.XSHG',  # 日经225ETF华安
+        '159509.XSHE',  # 纳指科技ETF景顺
+        '515000.XSHG',  # 科技ETF华宝
+        '515650.XSHG',  # 消费50ETF富国
+        '159996.XSHE',  # 家电ETF国泰
+        '515260.XSHG',  # 电子ETF华宝
+        '515700.XSHG',  # 新能源车ETF平安
+        '515030.XSHG',  # 新能源车ETF华夏
+        '159792.XSHE',  # 港股通互联网ETF富国
+        '588200.XSHG',  # 科创芯片ETF嘉实
+        '588160.XSHG',  # 科创新材料ETF南方
     ]
     g.m_days = 21  # 动量参考天数
+    # A/B 开关：False=原始单21日；True=10/21/40日按各窗口R²加权融合。
+    # 融合用于降低单一21日窗口对短期急涨的敏感性；在趋势快速切换时可能反应偏慢，
+    # 必须与基线在同一长样本、同一ETF池下比较回撤、Sharpe及换手后再决定是否上线。
+    g.use_fused_momentum = True
+    g.momentum_windows = [10, 21, 40]
     # 回测资格过滤：至少有 60 根历史日 K 才参与排名，避免新上市 ETF 的短样本高波动放大收益。
     # 只约束候选资格，不改变 21 日动量分数，也不增加换手。
     g.min_history_days = 60
@@ -159,8 +176,57 @@ def set_backtest():
 """ ====================== 策略3: ETF轮动 ====================== """
 
 
+def calc_momentum_window(prices, window):
+    """计算单窗口加权对数回归动量，保持原聚宽策略的 np.polyfit 口径。"""
+    if prices is None or len(prices) < window:
+        return None
+
+    values = prices.iloc[-window:].values
+    if np.any(values <= 0):
+        return None
+
+    y = np.log(values)
+    x = np.arange(len(y))
+    weights = np.linspace(1, 2, len(y))
+
+    slope, intercept = np.polyfit(x, y, 1, w=weights)
+    annualized_returns = math.exp(slope * 250) - 1
+    ss_res = np.sum(weights * (y - (slope * x + intercept)) ** 2)
+    ss_tot = np.sum(weights * (y - np.mean(y)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot else 0
+    return annualized_returns * r2, annualized_returns, r2
+
+
+def calc_momentum_score(prices):
+    """按开关计算原21日分数或多窗口R²加权融合分数。"""
+    if not g.use_fused_momentum:
+        return calc_momentum_window(prices, g.m_days)
+
+    rows = []
+    for window in g.momentum_windows:
+        result = calc_momentum_window(prices, window)
+        if result is None:
+            continue
+        score, annualized_returns, r2 = result
+        # 与 Go MultiWindowMomentumScore 一致：只用正 R² 作为融合权重。
+        weight = max(r2, 0)
+        if weight > 0:
+            rows.append((weight, score, annualized_returns, r2))
+
+    if rows:
+        sum_weight = sum(row[0] for row in rows)
+        fused_score = sum(row[0] * row[1] for row in rows) / sum_weight
+        fused_annualized = sum(row[0] * row[2] for row in rows) / sum_weight
+        fused_r2 = sum(row[0] * row[3] for row in rows) / sum_weight
+        return fused_score, fused_annualized, fused_r2
+
+    # 所有窗口均无正 R² 时，退化到最大窗口，避免候选无故消失。
+    fallback_window = max(g.momentum_windows) if g.momentum_windows else g.m_days
+    return calc_momentum_window(prices, fallback_window)
+
+
 def get_etf_rank(context, etf_pool):
-    """计算ETF池中各ETF的动量得分并排名"""
+    """计算ETF池中各ETF的单窗口或融合动量得分并排名。"""
     data = pd.DataFrame(index=etf_pool, columns=["annualized_returns", "r2", "score"])
     print_data = {}
     filtered_out = [] # 记录被过滤掉的ETF
@@ -171,31 +237,18 @@ def get_etf_rank(context, etf_pool):
 
     for etf in etf_pool:
         # 先取成熟期所需历史，再仅用末尾 g.m_days 计算动量。
-        history = attribute_history(etf, max(g.m_days + 1, g.min_history_days), '1d', ['close'])['close']
+        max_window = max(g.momentum_windows) if g.use_fused_momentum else g.m_days
+        history = attribute_history(etf, max(max_window + 1, g.min_history_days), '1d', ['close'])['close']
 
         if history.empty or len(history) < g.min_history_days:
             continue
-        prices = history.iloc[-g.m_days:]
-
-        # 核心计算逻辑：加权线性回归
-        y = np.log(prices.values)
-        x = np.arange(len(y))
-        weights = np.linspace(1, 2, len(y))
-
         try:
-            # 计算年化收益率
-            slope, intercept = np.polyfit(x, y, 1, w=weights)
-            annualized_returns = math.exp(slope * 250) - 1
+            result = calc_momentum_score(history)
+            if result is None:
+                continue
+            score, annualized_returns, r2 = result
             data.loc[etf, "annualized_returns"] = annualized_returns
-
-            # 计算R2
-            ss_res = np.sum(weights * (y - (slope * x + intercept)) ** 2)
-            ss_tot = np.sum(weights * (y - np.mean(y)) ** 2)
-            r2 = 1 - ss_res / ss_tot if ss_tot else 0
             data.loc[etf, "r2"] = r2
-
-            # 计算得分
-            score = annualized_returns * r2
             data.loc[etf, "score"] = score
 
             # 更新局部变量 max_observed_score
@@ -226,31 +279,16 @@ def get_etf_rank(context, etf_pool):
         # 计算前一天的分数
         yesterday_scores = {}
         for etf in high_score_etfs:
-            # 获取过去 g.m_days+1 天的收盘价历史数据，以便计算t-1日分数
-            prices = attribute_history(etf, g.m_days + 1, '1d', ['close'])['close']
-            if prices.empty or len(prices) < g.m_days + 1:
+            max_window = max(g.momentum_windows) if g.use_fused_momentum else g.m_days
+            prices = attribute_history(etf, max(max_window + 1, g.min_history_days), '1d', ['close'])['close']
+            if prices.empty or len(prices) < max_window + 1:
                 continue
 
-            # 计算t-1日的分数（使用前g.m_days天的数据）
-            yesterday_prices = prices[:-1] # 去掉最后一天，保留前g.m_days天
-
-            # 核心计算逻辑：加权线性回归
-            y = np.log(yesterday_prices.values)
-            x = np.arange(len(y))
-            weights = np.linspace(1, 2, len(y))
-
             try:
-                # 计算年化收益率
-                slope, intercept = np.polyfit(x, y, 1, w=weights)
-                annualized_returns = math.exp(slope * 250) - 1
-
-                # 计算R2
-                ss_res = np.sum(weights * (y - (slope * x + intercept)) ** 2)
-                ss_tot = np.sum(weights * (y - np.mean(y)) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot else 0
-
-                # 计算t-1日得分
-                yesterday_score = annualized_returns * r2
+                result = calc_momentum_score(prices.iloc[:-1])
+                if result is None:
+                    continue
+                yesterday_score = result[0]
                 yesterday_scores[etf] = yesterday_score
             except Exception as e:
                 log.warning(f"计算ETF {etf} t-1日得分时出错: {e}")
