@@ -1,9 +1,31 @@
+README.md
+  s_c329f3ce8e093b::t_bb5caa4e767025 456-467
+agent/rotation.go
+  s_c329f3ce8e093b::t_e68ce4cd87befc 84-105,336-340,489,530-560
+agent/rotation_test.go
+  s_c329f3ce8e093b::t_938cd7e3cb48ef 118-119,129-163
+docs/CHANGELOG-strategy.md
+  s_c329f3ce8e093b::t_0ee1bbb4d71fcc 751-817
+indicator/momentum_score.go
+  s_c329f3ce8e093b::t_3c443b86fcecbf 14,22,55-57,63-68
+indicator/momentum_score_test.go
+  s_c329f3ce8e093b::t_ba446594fee9c4 16-17,76-95
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.4",
+  "git_ai_version": "1.6.10",
   "base_commit_sha": "07588e9593362faa4abf1923114a3862c034739f",
   "prompts": {},
+  "sessions": {
+    "s_c329f3ce8e093b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6460-49ba-7d32-89ff-e52928d9e500",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    }
+  },
   "attestation_metadata": {},
   "remote_transcripts": {}
 }
