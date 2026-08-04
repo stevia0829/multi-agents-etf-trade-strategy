@@ -1,9 +1,37 @@
+.gitignore
+  s_b65431e3bbaae3::t_c7cd555251ba2e 38-39
+agent/final.go
+  s_98822294b6adf2::t_b81a817e483c09 677-688,690,692,694-695,697,702-718,1219-1252,1259-1263,1265,1268,1284-1290,1292-1320,1323-1324,1326-1336,1393,1395-1418,1430-1435,1441-1448
+agent/holdreview_test.go
+  s_98822294b6adf2::t_abc65801515e4c 86-87,93-100
+indicator/indicator.go
+  s_98822294b6adf2::t_4948d241b1df7b 118-136
+main.go
+  s_98822294b6adf2::t_cdf64a41b453de 235,298,343-346,348,351-363,365,369-377,379-380,384-385,387-392,395-424,426
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.4",
+  "git_ai_version": "1.6.10",
   "base_commit_sha": "751a41b23534956a527c1c78091e77ff25694241",
   "prompts": {},
+  "sessions": {
+    "s_98822294b6adf2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6c8e584c-d190-49b3-9c50-43a9cf3b316b",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    },
+    "s_b65431e3bbaae3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb24f-5d03-76a0-ac29-1cfa0f7f9e09",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    }
+  },
   "attestation_metadata": {},
   "remote_transcripts": {}
 }
