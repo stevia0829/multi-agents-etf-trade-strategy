@@ -3,12 +3,25 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/multi-agents-etf-trade-strategy/datasource"
+	"github.com/multi-agents-etf-trade-strategy/indicator"
 	"github.com/multi-agents-etf-trade-strategy/types"
+)
+
+// 盘中移动止盈 / 见顶 / 浮盈阶梯的阈值（初始建议值，集中在此便于调参）。
+const (
+	intradayKLineDays   = 20   // 拉取 K 线根数（≥15 才能稳定计算 ATR14 / RSI14）
+	trailingLookback    = 5    // 移动止盈回看的高点天数
+	rsiOverbought       = 70   // RSI 超买阈值（见顶信号）
+	lowVolATRRatio      = 0.02 // ATR/price < 此值视为低波动品种
+	profitWatchLowVol   = 0.03 // 低波动品种浮盈观察区阈值
+	profitWatchHighVol  = 0.05 // 高波动品种浮盈观察区阈值
+	firstBreakTolerance = 0.02 // 涨势中"首次跌破 MA5"的容差：VsMA5 ∈ (-此值, 0) 视为刚破位
 )
 
 // IntradayWatchAgent 盘中实时盯盘 Agent。
@@ -54,7 +67,7 @@ func (a *IntradayWatchAgent) Run(ctx context.Context) (*types.IntradayAnalysis, 
 	}
 
 	// 2. 大盘快照（510300）
-	market := a.snapshot(ctx, "510300", "沪深300ETF华泰柏瑞", "宽基", false, false)
+	market := a.snapshot(ctx, "510300", "沪深300ETF华泰柏瑞", "宽基", false, false, 0)
 
 	// 3. 逐只快照 + 判定
 	snapshots := make([]types.IntradaySnapshot, 0, len(targets))
@@ -64,7 +77,7 @@ func (a *IntradayWatchAgent) Run(ctx context.Context) (*types.IntradayAnalysis, 
 			return nil, ctx.Err()
 		default:
 		}
-		s := a.snapshot(ctx, t.Code, t.Name, t.Sector, t.IsHold, t.IsTopPick)
+		s := a.snapshot(ctx, t.Code, t.Name, t.Sector, t.IsHold, t.IsTopPick, t.Cost)
 		snapshots = append(snapshots, s)
 	}
 
@@ -97,6 +110,7 @@ type intradayTarget struct {
 	Code, Name, Sector string
 	IsHold             bool
 	IsTopPick          bool
+	Cost               float64 // 持仓成本价（HoldCosts 提供；0 表示无成本数据）
 }
 
 func (a *IntradayWatchAgent) mergeTargets() []intradayTarget {
@@ -111,7 +125,7 @@ func (a *IntradayWatchAgent) mergeTargets() []intradayTarget {
 		}
 		seen[code] = true
 		name, sector := lookupETFName(code)
-		out = append(out, intradayTarget{Code: code, Name: name, Sector: sector, IsHold: true})
+		out = append(out, intradayTarget{Code: code, Name: name, Sector: sector, IsHold: true, Cost: a.Conf.HoldCosts[code]})
 	}
 
 	// 推荐 Top5
@@ -136,7 +150,7 @@ func (a *IntradayWatchAgent) mergeTargets() []intradayTarget {
 
 // snapshot 拉取单只标的的实时快照并生成判定。
 func (a *IntradayWatchAgent) snapshot(
-	ctx context.Context, code, name, sector string, isHold, isTopPick bool,
+	ctx context.Context, code, name, sector string, isHold, isTopPick bool, cost float64,
 ) types.IntradaySnapshot {
 	s := types.IntradaySnapshot{
 		ETFCode: code, ETFName: name, Sector: sector,
@@ -155,8 +169,8 @@ func (a *IntradayWatchAgent) snapshot(
 		}
 	}
 
-	// 近期 K 线（11 根 = 计算 MA5/MA10 + 趋势判断）
-	klines, err := a.DS.GetKLine(code, 11)
+	// 近期 K 线（intradayKLineDays 根：计算 MA5/MA10/RSI14/ATR14 + 高点回撤）
+	klines, err := a.DS.GetKLine(code, intradayKLineDays)
 	if err == nil && len(klines) >= 5 {
 		last := klines[len(klines)-1]
 		// 如果实时价 > 0，用实时价覆盖最后一根的 Close（盘中 K 线 Close 尚未更新）
@@ -184,6 +198,13 @@ func (a *IntradayWatchAgent) snapshot(
 			s.VsMA5 = (s.Price - s.MA5) / s.MA5
 		}
 		s.RecentTrend = recentTrend(klines)
+		// A+B 止盈信号所需指标（需 ≥15 根才稳定；intradayKLineDays=20 留余量）
+		s.RSI = indicator.RSI(klines, 14)
+		s.ATR = indicator.ATR(klines, 14)
+		s.PeakPrice = indicator.HighOverLastN(klines, trailingLookback)
+		if s.PeakPrice > 0 && s.Price > 0 {
+			s.TrailingPullback = (s.PeakPrice - s.Price) / s.PeakPrice
+		}
 	}
 
 	// 报告关键价位（优先集合竞价修正价，回退 8:50 早报原价）
@@ -224,6 +245,12 @@ func (a *IntradayWatchAgent) snapshot(
 			}
 			s.PrevTrend = intradayTrend(series)
 		}
+	}
+
+	// 持仓成本 / 真实浮盈（HoldCosts 提供；cost<=0 时跳过，不报假浮盈）
+	if cost > 0 && s.Price > 0 {
+		s.Cost = cost
+		s.ProfitPct = (s.Price - cost) / cost
 	}
 
 	// 判定
@@ -351,7 +378,47 @@ func (a *IntradayWatchAgent) judgeHold(s *types.IntradaySnapshot) {
 		return
 	}
 
-	// 3. 接近或超过止盈
+	// 移动止盈（A）：近 trailingLookback 日高点回撤 ≥ ATR 自适应阈值 且 跌破 MA5。
+	// 有成本价时额外要求浮盈为正（锁盈）；无成本价时只要回撤达标即提示动量转弱。
+	if s.PeakPrice > 0 && s.VsMA5 < 0 {
+		trig := trailingTrigger(s.ATR, price)
+		profitOK := s.Cost <= 0 || s.ProfitPct > 0
+		if s.TrailingPullback >= trig && profitOK {
+			s.Signal = "trim_now"
+			s.SignalCn = fmt.Sprintf("高点回撤 %.1f%%（阈值 %.1f%%）跌破MA5，动量转弱", s.TrailingPullback*100, trig*100)
+			s.Priority = "watch"
+			if s.Cost > 0 {
+				s.Rationale = fmt.Sprintf("近%d日高点 %.3f 回撤 %.1f%%（ATR 阈值 %.1f%%），跌破 MA5 %.1f%%；当前浮盈 %.1f%%，建议分批止盈锁盈。",
+					trailingLookback, s.PeakPrice, s.TrailingPullback*100, trig*100, -s.VsMA5*100, s.ProfitPct*100)
+			} else {
+				s.Rationale = fmt.Sprintf("近%d日高点 %.3f 回撤 %.1f%%（ATR 阈值 %.1f%%），跌破 MA5 %.1f%%，动量转弱，建议分批止盈。",
+					trailingLookback, s.PeakPrice, s.TrailingPullback*100, trig*100, -s.VsMA5*100)
+			}
+			return
+		}
+	}
+
+	// 见顶信号（B）：RSI 超买 + 当日长上影；或涨势中首次跌破 MA5（轻微破位）。
+	{
+		longUpperShadow := s.DayHigh > 0 && s.Open > 0 &&
+			(s.DayHigh-math.Max(s.Open, price)) > math.Abs(price-s.Open) // 上影 > 当日实体
+		if s.RSI >= rsiOverbought && longUpperShadow {
+			s.Signal = "trim_now"
+			s.SignalCn = fmt.Sprintf("RSI %.0f 超买 + 长上影，见顶概率升高", s.RSI)
+			s.Priority = "watch"
+			s.Rationale = fmt.Sprintf("RSI %.0f 进入超买区，当日上影较长（高点 %.3f），冲高回落风险大，建议止盈落袋。", s.RSI, s.DayHigh)
+			return
+		}
+		if s.RecentTrend == "up" && s.VsMA5 < 0 && s.VsMA5 > -firstBreakTolerance {
+			s.Signal = "trim_now"
+			s.SignalCn = "连涨后跌破 MA5，短线转弱"
+			s.Priority = "watch"
+			s.Rationale = "近 5 日趋势向上但今日刚跌破 MA5，涨势见顶信号，建议分批止盈。"
+			return
+		}
+	}
+
+	// 接近或超过止盈（死目标，保留原有逻辑）
 	if s.TakeProfit > 0 && price >= s.TakeProfit*0.97 {
 		if price >= s.TakeProfit {
 			s.Signal = "trim_now"
@@ -376,7 +443,7 @@ func (a *IntradayWatchAgent) judgeHold(s *types.IntradaySnapshot) {
 		return
 	}
 
-	// 5. 一切正常
+	// 一切正常
 	s.Signal = "hold"
 	s.SignalCn = "正常持有"
 	s.Priority = "info"
@@ -393,6 +460,14 @@ func (a *IntradayWatchAgent) judgeHold(s *types.IntradaySnapshot) {
 		s.Rationale = strings.Join(reasons, "，") + "，暂无风险信号。"
 	} else {
 		s.Rationale = "未检测到风险信号。"
+	}
+
+	// 浮盈阶梯（C）：有成本价且浮盈达观察阈值 → 升级 watch（止盈观察区），signal 保持 hold。
+	// A+B 未命中时，这里给出"可分批止盈/上移止盈位"的软提示；cost<=0 时跳过。
+	if s.Cost > 0 && s.ProfitPct >= profitObserveThreshold(s.ATR, price) {
+		s.Priority = "watch"
+		s.SignalCn = fmt.Sprintf("浮盈 %.1f%%，进入止盈观察区", s.ProfitPct*100)
+		s.Rationale += fmt.Sprintf(" 浮盈 %.1f%% 已达观察阈值，可考虑分批止盈或上移止盈位锁盈。", s.ProfitPct*100)
 	}
 }
 
@@ -539,6 +614,26 @@ func sma(klines []types.KLine, n int) float64 {
 	return sum / float64(n)
 }
 
+// trailingTrigger ATR 自适应的移动止盈回撤阈值：2×ATR/price，clamp [3%,10%]；
+// atr/price 不可用时退化 5%。与 final.go pullbackCooldownTrigger 同口径，复用 snapshot 已算的 ATR。
+func trailingTrigger(atr, price float64) float64 {
+	if atr <= 0 || price <= 0 {
+		return 0.05
+	}
+	return clamp(2*atr/price, 0.03, 0.10)
+}
+
+// profitObserveThreshold 浮盈观察区阈值：低波动品种（ATR/price<lowVolATRRatio）3%，其余 5%。
+func profitObserveThreshold(atr, price float64) float64 {
+	if atr <= 0 || price <= 0 {
+		return profitWatchHighVol
+	}
+	if atr/price < lowVolATRRatio {
+		return profitWatchLowVol
+	}
+	return profitWatchHighVol
+}
+
 // recentTrend 近 5 日趋势：close[5] vs close[1]。
 func recentTrend(klines []types.KLine) string {
 	if len(klines) < 5 {
@@ -584,6 +679,15 @@ func FormatIntradayCLI(a *types.IntradayAnalysis) string {
 		b.WriteString(fmt.Sprintf("%s %s(%s)%s\n", icon, s.ETFName, s.ETFCode, tags))
 		b.WriteString(fmt.Sprintf("   当前 %.3f  涨跌 %.2f%%  vsMA5 %.2f%%  趋势%s\n",
 			s.Price, s.ChangePct, s.VsMA5*100, trendCn(s.RecentTrend)))
+		// 止盈辅助指标：近5日高点回撤 / RSI；持仓额外显示成本+浮盈
+		if s.PeakPrice > 0 {
+			holdChip := ""
+			if s.Cost > 0 {
+				holdChip = fmt.Sprintf("  💰成本 %.3f(浮盈 %+.2f%%)", s.Cost, s.ProfitPct*100)
+			}
+			b.WriteString(fmt.Sprintf("   📈 高点 %.3f(回撤 %.1f%%)  RSI %.0f%s\n",
+				s.PeakPrice, s.TrailingPullback*100, s.RSI, holdChip))
+		}
 		if s.EntryPrice > 0 {
 			b.WriteString(fmt.Sprintf("   🟢 入场 %.3f (距入场 %+.2f%%)\n",
 				s.EntryPrice, s.DistToEntry*100))

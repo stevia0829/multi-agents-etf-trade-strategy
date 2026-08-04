@@ -115,3 +115,22 @@ func VolumeRatio(klines []types.KLine, n int) float64 {
 	}
 	return klines[len(klines)-1].Volume / avgVol
 }
+
+// HighOverLastN 取最近 n 根 K 线的最高价 max(High, Close)，用于移动止盈 / 高点回撤判定。
+// n<=0 或无 K 线返回 0；n 超过长度时取全部。
+func HighOverLastN(klines []types.KLine, n int) float64 {
+	if n <= 0 || len(klines) == 0 {
+		return 0
+	}
+	start := max(len(klines)-n, 0)
+	high := 0.0
+	for _, k := range klines[start:] {
+		if k.High > high {
+			high = k.High
+		}
+		if k.Close > high {
+			high = k.Close
+		}
+	}
+	return high
+}

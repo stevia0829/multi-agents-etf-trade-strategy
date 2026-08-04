@@ -232,7 +232,7 @@ func parseCurrentHolds(raw string) []string {
 //   - 持仓来源优先 holding.json（claw/微信桥维护），回退 --current-hold
 //   - 最后用 IntradayWatchAgent 结合实时行情给出买卖指导
 func runIntraday(currentHoldRaw, holdFile string, skipReport bool, reportDir string) {
-	holds, holdSrc := loadHolds(holdFile, currentHoldRaw)
+	holds, holdCosts, holdSrc := loadHolds(holdFile, currentHoldRaw)
 
 	fmt.Println("=== 盘中实时盯盘 ===")
 	fmt.Println("时间:", time.Now().Format("2006-01-02 15:04:05"))
@@ -295,6 +295,7 @@ func runIntraday(currentHoldRaw, holdFile string, skipReport bool, reportDir str
 	ds := datasource.NewEastMoneyDataSource()
 	conf := types.IntradayWatchConfig{
 		CurrentHolds:  holds,
+		HoldCosts:     holdCosts,
 		FinalDecision: state.Final,
 		Top5:          state.Screener.Top5,
 		PreOpen:       preOpen,
@@ -339,35 +340,90 @@ func runIntradayPipeline(ctx context.Context, holds []string) (*types.AgentState
 }
 
 // loadHolds 解析持仓来源：优先 holding.json（claw/微信桥维护），文件不存在/解析失败时回退 --current-hold。
-// 返回 (holds, 来源标签)。文件存在且解析成功即信任其内容（含空仓）。
-func loadHolds(holdFile, currentHoldRaw string) ([]string, string) {
-	if holds, ok := tryLoadHoldsFile(holdFile); ok {
-		return holds, holdFile
+// 返回 (holds, holdCosts, 来源标签)。文件存在且解析成功即信任其内容（含空仓）。
+func loadHolds(holdFile, currentHoldRaw string) ([]string, map[string]float64, string) {
+	if codes, costs, ok := tryLoadHoldsFile(holdFile); ok {
+		return codes, costs, holdFile
 	}
-	return parseCurrentHolds(currentHoldRaw), "--current-hold"
+	return parseCurrentHolds(currentHoldRaw), map[string]float64{}, "--current-hold"
 }
 
-// tryLoadHoldsFile 容忍两种格式：{"holds":[...]} / {"codes":[...]} 或裸数组 [...]。
-func tryLoadHoldsFile(path string) ([]string, bool) {
+// holdEntry holding.json 对象数组元素：{"code":"159915","cost":1.234}。
+type holdEntry struct {
+	Code string  `json:"code"`
+	Cost float64 `json:"cost"`
+}
+
+// tryLoadHoldsFile 容忍多种格式，返回 (codes, costs, ok)：
+//   - {"holds":[{"code":"159915","cost":1.234}]} / {"codes":[...]}（带成本，推荐）
+//   - {"holds":["159915"]} / {"codes":[...]}（旧格式，cost 留空）
+//   - 裸数组 [{"code":"159915","cost":1.234}] 或 ["159915"]
+//
+// 旧格式仍被接受（cost 留空），向后兼容。
+func tryLoadHoldsFile(path string) ([]string, map[string]float64, bool) {
 	if strings.TrimSpace(path) == "" {
-		return nil, false
+		return nil, nil, false
 	}
 	buf, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false // 文件不存在 → 用 flag
+		return nil, nil, false // 文件不存在 → 用 flag
 	}
-	var obj struct {
+	// 对象数组（带 cost）
+	var objEntry struct {
+		Holds []holdEntry `json:"holds"`
+		Codes []holdEntry `json:"codes"`
+	}
+	if json.Unmarshal(buf, &objEntry) == nil && (len(objEntry.Holds) > 0 || len(objEntry.Codes) > 0) {
+		return normalizeHoldEntries(append(objEntry.Holds, objEntry.Codes...))
+	}
+	// 旧对象格式（纯字符串）
+	var objStr struct {
 		Holds []string `json:"holds"`
 		Codes []string `json:"codes"`
 	}
-	if json.Unmarshal(buf, &obj) == nil {
-		return normalizeHoldsList(append(obj.Holds, obj.Codes...)), true
+	if json.Unmarshal(buf, &objStr) == nil && (len(objStr.Holds) > 0 || len(objStr.Codes) > 0) {
+		return normalizeHoldsList(append(objStr.Holds, objStr.Codes...)), map[string]float64{}, true
 	}
+	// 裸对象数组（带 cost）
+	var arrEntry []holdEntry
+	if json.Unmarshal(buf, &arrEntry) == nil && len(arrEntry) > 0 {
+		return normalizeHoldEntries(arrEntry)
+	}
+	// 裸字符串数组
 	var arr []string
 	if json.Unmarshal(buf, &arr) == nil {
-		return normalizeHoldsList(arr), true
+		return normalizeHoldsList(arr), map[string]float64{}, true
 	}
-	return nil, false // 解析失败 → 用 flag
+	return nil, nil, false // 解析失败 → 用 flag
+}
+
+// normalizeHoldEntries 对带 cost 的持仓条目去空白 + 去重保序，输出 codes + costs。
+// costs 仅在 cost>0 时写入；重复 code 的 cost 以最后一条为准。
+func normalizeHoldEntries(in []holdEntry) ([]string, map[string]float64, bool) {
+	seen := make(map[string]struct{}, len(in))
+	codes := make([]string, 0, len(in))
+	costs := make(map[string]float64, len(in))
+	for _, e := range in {
+		c := strings.TrimSpace(e.Code)
+		if c == "" {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			if e.Cost > 0 {
+				costs[c] = e.Cost
+			}
+			continue
+		}
+		seen[c] = struct{}{}
+		codes = append(codes, c)
+		if e.Cost > 0 {
+			costs[c] = e.Cost
+		}
+	}
+	if len(codes) == 0 {
+		return nil, nil, false
+	}
+	return codes, costs, true
 }
 
 // normalizeHoldsList 去空白 + 去重保序；空切片归一为 nil。

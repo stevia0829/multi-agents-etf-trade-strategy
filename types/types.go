@@ -273,6 +273,7 @@ type HoldAdvice struct {
 // IntradayWatchConfig 盘中盯盘的输入配置。
 type IntradayWatchConfig struct {
 	CurrentHolds  []string            // 当前持仓代码列表
+	HoldCosts     map[string]float64  // 持仓成本价（可选，code→cost）；缺省则该标的浮盈类信号退化
 	FinalDecision *FinalDecision      // 今日早报的最终决策（可为 nil，退化到纯实时信号）
 	Top5          []ScoredETF         // 今日 Screener Top5（FinalDecision 为 nil 时用）
 	PreOpen       *PreOpenAnalysis    // 今日 9:24 集合竞价复核（可为 nil）。提供时优先用其 adj_entry/stop/take
@@ -305,11 +306,19 @@ type IntradaySnapshot struct {
 	DistToStop  float64 `json:"dist_to_stop"`  // (price-stop)/stop，正=未破止损
 	DistToTP    float64 `json:"dist_to_tp"`    // (price-tp)/tp，正=已超止盈
 
+	// ── 与持仓成本的关系（HoldCosts 提供；Cost<=0 时本组无效）──
+	Cost      float64 `json:"cost,omitempty"`       // 持仓成本价
+	ProfitPct float64 `json:"profit_pct,omitempty"` // 真实浮盈率 (price-cost)/cost，正=浮盈
+
 	// ── 近期 K 线技术指标 ──
-	MA5         float64 `json:"ma5"`
-	MA10        float64 `json:"ma10"`
-	VsMA5       float64 `json:"vs_ma5"`       // (price-ma5)/ma5 %
-	RecentTrend string  `json:"recent_trend"` // up / flat / down（近 5 日）
+	MA5              float64 `json:"ma5"`
+	MA10             float64 `json:"ma10"`
+	VsMA5            float64 `json:"vs_ma5"`                      // (price-ma5)/ma5 %
+	RecentTrend      string  `json:"recent_trend"`                // up / flat / down（近 5 日）
+	RSI              float64 `json:"rsi,omitempty"`               // 14 日 RSI（超买见顶用）
+	ATR              float64 `json:"atr,omitempty"`               // 14 日 ATR（自适应阈值用）
+	PeakPrice        float64 `json:"peak_price,omitempty"`        // 近 5 日最高价 max(High,Close)
+	TrailingPullback float64 `json:"trailing_pullback,omitempty"` // 从 PeakPrice 的回撤幅度（正值）
 
 	// ── 判定结论 ──
 	Signal    string `json:"signal"`    // chase_now / pullback_entry / wait / abandon / hold / trim_now / stop_out / add

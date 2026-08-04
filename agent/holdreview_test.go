@@ -83,14 +83,21 @@ func TestBuildHoldReviewsFallback_MultipleHolds(t *testing.T) {
 	}
 }
 
-func TestBuildHoldReviewsFallback_IgnoresHoldOutsideCandidates(t *testing.T) {
+func TestBuildHoldReviewsFallback_OffPoolHoldGetsTrim(t *testing.T) {
+	// D 方案：池外持仓（不在 Top5/豁免位）现在补一条 trim/observe，不再被忽略。
 	top := []types.ScoredETF{
 		{ETF: types.ETF{Code: "513100", Name: "纳指ETF", Sector: "海外"}, Score: 80, Action: string(ActionStrongBuy)},
 	}
 	st := makeStateWithHolds([]string{"999999"}, top, nil, nil)
 	out := buildHoldReviewsFallback(st)
-	if len(out) != 0 {
-		t.Fatalf("expect 0 reviews when hold not in candidates, got %d", len(out))
+	if len(out) != 1 {
+		t.Fatalf("expect 1 review for off-pool hold, got %d", len(out))
+	}
+	if out[0].Action != "trim" {
+		t.Fatalf("off-pool hold expect trim, got %s", out[0].Action)
+	}
+	if out[0].InTop || out[0].Rank != 0 {
+		t.Fatalf("off-pool hold expect InTop=false rank=0, got InTop=%v rank=%d", out[0].InTop, out[0].Rank)
 	}
 }
 

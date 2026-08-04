@@ -35,3 +35,5 @@ specs/doc_export/
 .mcp.json
 ai-plugin.json
 ai-plugin-lock.json
+# @byted-motor/aicoding-telemetry: git-hook run log (do not commit)
+.motor-code/log/

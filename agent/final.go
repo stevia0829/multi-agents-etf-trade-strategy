@@ -674,45 +674,48 @@ func collectHolds(st *types.AgentState) map[string]struct{} {
 	return out
 }
 
-func PullbackCooldownNote(target types.ScoredETF) string {
-	klines := target.ETF.History
-	if len(klines) < pullbackCooldownLookback {
-		return ""
+// PullbackCooldownSignal 从 PullbackCooldownNote 抽出的纯算法（不依赖 ScoredETF），
+// 供盘中移动止盈（agent/intraday.go）与 final 回撤冷却共用。
+//
+// 返回 (pullback, trigger, hit)：
+//   - pullback = (近 N 日高点 - price) / 近 N 日高点（从高点回撤幅度，正值）
+//   - trigger  = ATR 自适应阈值（clamp 到 [3%,10%]，ATR 不可用时 5%）
+//   - hit      = pullback ≥ trigger 且未收复 MA5 / 最近阴线半分位（即"回撤尚未修复"）
+//
+// ma5<=0 时内部退化到 avgClose(klines,5)。price<=0 或 K 线不足返回 (0,0,false)。
+func PullbackCooldownSignal(klines []types.KLine, price, ma5 float64) (pullback, trigger float64, hit bool) {
+	if len(klines) < pullbackCooldownLookback || price <= 0 {
+		return 0, 0, false
 	}
-	price := target.ETF.Price
-	if price <= 0 {
-		price = klines[len(klines)-1].Close
-	}
-	if price <= 0 {
-		return ""
-	}
-
-	start := len(klines) - pullbackCooldownLookback
-	high := 0.0
-	for _, k := range klines[start:] {
-		if k.High > high {
-			high = k.High
-		}
-		if k.Close > high {
-			high = k.Close
-		}
-	}
+	high := indicator.HighOverLastN(klines, pullbackCooldownLookback)
 	if high <= 0 {
-		return ""
+		return 0, 0, false
 	}
-	pullback := (high - price) / high
-	trigger := pullbackCooldownTrigger(klines, price)
+	pullback = (high - price) / high
+	trigger = pullbackCooldownTrigger(klines, price)
 	if pullback < trigger {
-		return ""
+		return pullback, trigger, false
 	}
-
-	ma5 := target.Indicators["MA5"]
 	if ma5 <= 0 {
 		ma5 = avgClose(klines, 5)
 	}
-	reclaimedMA5 := ma5 > 0 && price >= ma5
-	reclaimedPrevHalf := reclaimedLastBearHalf(klines, price)
-	if reclaimedMA5 || reclaimedPrevHalf {
+	if ma5 > 0 && price >= ma5 {
+		return pullback, trigger, false // 已收复 MA5，视为修复
+	}
+	if reclaimedLastBearHalf(klines, price) {
+		return pullback, trigger, false // 已收复最近阴线半分位，视为修复
+	}
+	return pullback, trigger, true
+}
+
+func PullbackCooldownNote(target types.ScoredETF) string {
+	klines := target.ETF.History
+	price := target.ETF.Price
+	if price <= 0 && len(klines) > 0 {
+		price = klines[len(klines)-1].Close
+	}
+	pullback, trigger, hit := PullbackCooldownSignal(klines, price, target.Indicators["MA5"])
+	if !hit {
 		return ""
 	}
 	return fmt.Sprintf("近%d日高点回撤 %.2f%%（ATR 自适应阈值 %.1f%%），且未收复 MA5 / 最近阴线半分位",
@@ -1213,22 +1216,56 @@ func holdCandidatesPayload(st *types.AgentState) []map[string]interface{} {
 		}
 		out = append(out, row)
 	}
+	// 池外持仓（不在 Top5/豁免位）：也喂给 LLM 评审，标注"池外，仅评审"
+	topSet := map[string]struct{}{}
+	for _, e := range st.Screener.Top5 {
+		topSet[e.ETF.Code] = struct{}{}
+	}
+	for _, code := range collectHoldsList(st) {
+		if _, inTop := topSet[code]; inTop {
+			continue
+		}
+		name, sector := lookupETFName(code)
+		offRow := map[string]interface{}{
+			"etf_code":    code,
+			"etf_name":    name,
+			"sector":      sector,
+			"rank":        0,
+			"score":       0,
+			"score_gap":   bestScore,
+			"action":      "",
+			"action_desc": "池外（未进动量候选）",
+			"is_top5":     false,
+			"note":        "该持仓未进今日动量 Top5，仅作持仓评审（建议结合盘中盯盘止盈信号）",
+		}
+		if n, ok := newsByCode[code]; ok {
+			offRow["news_sentiment"] = n.Sentiment
+			offRow["news_score"] = n.Score
+			offRow["news_summary"] = n.Summary
+		}
+		if t, ok := techByCode[code]; ok {
+			offRow["tech_trend"] = t.Trend
+			offRow["tech_score"] = t.Score
+			offRow["tech_summary"] = t.Summary
+		}
+		out = append(out, offRow)
+	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
 }
 
-// buildHoldReviewsFallback 规则版持仓评审：基于排名命中 + news/tech 客观信号映射 keep/trim/rotate。
-//   - 未命中候选（持仓不在 Top5 / 豁免位）：忽略，不出条目（与"忽略池外标的"决策一致）；
-//   - rotate：动作 = avoid 或 趋势=down 或 消息=negative 或 (与 best 分差 ≥ 15 且不在 Top3)；
-//   - trim：动作 = hold_only / 趋势=flat / 消息=neutral；
-//   - keep：动作 ∈ {strong_buy, buy} 且无负向信号。
+// buildHoldReviewsFallback 规则版持仓评审：holds 驱动（不再只遍历 Top5）。
+//   - 命中 Top5 / 豁免位的持仓：用候选 ScoredETF + news/tech 信号走 decideHoldAction → keep/trim/rotate；
+//   - 池外持仓（未进今日动量 Top5）：补一条 trim/observe，提示"动量转弱或防御板块滞涨，
+//     结合盘中盯盘止盈信号决定去留"——不算精确分（精确信号由盘中 intraday 给）。
+//   - rotate / trim / keep 的客观映射规则见 decideHoldAction。
 func buildHoldReviewsFallback(st *types.AgentState) []types.HoldReview {
-	if st == nil || st.Screener == nil || len(st.Screener.Top5) == 0 {
+	if st == nil || st.Screener == nil {
 		return nil
 	}
-	holds := collectHolds(st)
+	holds := collectHoldsList(st) // 去重保序
 	if len(holds) == 0 {
 		return nil
 	}
@@ -1244,33 +1281,59 @@ func buildHoldReviewsFallback(st *types.AgentState) []types.HoldReview {
 			techByCode[t.ETFCode] = t
 		}
 	}
-	bestScore := st.Screener.Top5[0].Score
-	out := make([]types.HoldReview, 0, len(holds))
+	// Top5 / 豁免位索引：code → (ScoredETF, rank)
+	type topCand struct {
+		e    types.ScoredETF
+		rank int
+	}
+	topByCode := map[string]topCand{}
+	bestScore := 0.0
 	for i, e := range st.Screener.Top5 {
-		if _, ok := holds[e.ETF.Code]; !ok {
+		topByCode[e.ETF.Code] = topCand{e, i + 1}
+		if i == 0 {
+			bestScore = e.Score
+		}
+	}
+	out := make([]types.HoldReview, 0, len(holds))
+	for _, code := range holds {
+		if c, ok := topByCode[code]; ok {
+			e := c.e
+			newsBias := classifyNewsBias(newsByCode[code])
+			techTrend := classifyTechTrend(techByCode[code])
+			gap := bestScore - e.Score
+			action, actionDesc := decideHoldAction(e, newsBias, techTrend, gap, c.rank)
+			out = append(out, types.HoldReview{
+				ETFCode:    e.ETF.Code,
+				ETFName:    e.ETF.Name,
+				Sector:     e.ETF.Sector,
+				InTop:      c.rank <= 5,
+				Rank:       c.rank,
+				Score:      e.Score,
+				Action:     action,
+				ActionDesc: actionDesc,
+				NewsBias:   newsBias,
+				TechTrend:  techTrend,
+				Rationale: fmt.Sprintf(
+					"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
+					e.Score, gap, e.ActionDesc, newsBias, techTrend, actionDesc,
+				),
+			})
 			continue
 		}
-		n := newsByCode[e.ETF.Code]
-		t := techByCode[e.ETF.Code]
-		newsBias := classifyNewsBias(n)
-		techTrend := classifyTechTrend(t)
-		gap := bestScore - e.Score
-		action, actionDesc := decideHoldAction(e, newsBias, techTrend, gap, i+1)
+		// 池外持仓：未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨）→ trim 观察
+		name, sector := lookupETFName(code)
 		out = append(out, types.HoldReview{
-			ETFCode:    e.ETF.Code,
-			ETFName:    e.ETF.Name,
-			Sector:     e.ETF.Sector,
-			InTop:      i < 5,
-			Rank:       i + 1,
-			Score:      e.Score,
-			Action:     action,
-			ActionDesc: actionDesc,
-			NewsBias:   newsBias,
-			TechTrend:  techTrend,
-			Rationale: fmt.Sprintf(
-				"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
-				e.Score, gap, e.ActionDesc, newsBias, techTrend, actionDesc,
-			),
+			ETFCode:    code,
+			ETFName:    name,
+			Sector:     sector,
+			InTop:      false,
+			Rank:       0,
+			Score:      0,
+			Action:     "trim",
+			ActionDesc: holdActionDesc("trim"),
+			NewsBias:   classifyNewsBias(newsByCode[code]),
+			TechTrend:  classifyTechTrend(techByCode[code]),
+			Rationale:  "未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨），建议结合盘中盯盘止盈信号决定去留。",
 		})
 	}
 	if len(out) == 0 {
@@ -1324,25 +1387,35 @@ func sanitizeHoldReviews(reviews []types.HoldReview, st *types.AgentState) []typ
 		if _, ok := holds[code]; !ok {
 			continue
 		}
-		e, hit := candidateByCode[code]
-		if !hit {
-			continue
-		}
 		if _, dup := seen[code]; dup {
 			continue
 		}
+		e, hit := candidateByCode[code]
 		seen[code] = struct{}{}
-		if r.ETFName == "" {
-			r.ETFName = e.ETF.Name
-		}
-		if r.Sector == "" {
-			r.Sector = e.ETF.Sector
-		}
-		if r.Score == 0 {
-			r.Score = e.Score
-		}
-		if r.Rank == 0 {
-			r.Rank = rankByCode[code]
+		if hit {
+			if r.ETFName == "" {
+				r.ETFName = e.ETF.Name
+			}
+			if r.Sector == "" {
+				r.Sector = e.ETF.Sector
+			}
+			if r.Score == 0 {
+				r.Score = e.Score
+			}
+			if r.Rank == 0 {
+				r.Rank = rankByCode[code]
+			}
+		} else {
+			// 池外持仓（不在 Top5/豁免位）：保留 LLM 评审，仅补 name/sector，不回填分数/名次
+			if r.ETFName == "" || r.Sector == "" {
+				name, sector := lookupETFName(code)
+				if r.ETFName == "" {
+					r.ETFName = name
+				}
+				if r.Sector == "" {
+					r.Sector = sector
+				}
+			}
 		}
 		r.InTop = r.Rank > 0 && r.Rank <= 5
 		newsBias := classifyNewsBias(newsByCode[code])
@@ -1354,16 +1427,25 @@ func sanitizeHoldReviews(reviews []types.HoldReview, st *types.AgentState) []typ
 			r.TechTrend = techTrend
 		}
 		if !validHoldAction(r.Action) {
-			r.Action, r.ActionDesc = decideHoldAction(e, newsBias, techTrend, bestScore-e.Score, r.Rank)
+			if hit {
+				r.Action, r.ActionDesc = decideHoldAction(e, newsBias, techTrend, bestScore-e.Score, r.Rank)
+			} else {
+				// 池外持仓默认 trim 观察（精确止盈信号由盘中 intraday 给）
+				r.Action, r.ActionDesc = "trim", holdActionDesc("trim")
+			}
 		}
 		if r.ActionDesc == "" {
 			r.ActionDesc = holdActionDesc(r.Action)
 		}
 		if strings.TrimSpace(r.Rationale) == "" {
-			r.Rationale = fmt.Sprintf(
-				"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
-				e.Score, bestScore-e.Score, e.ActionDesc, r.NewsBias, r.TechTrend, r.ActionDesc,
-			)
+			if hit {
+				r.Rationale = fmt.Sprintf(
+					"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
+					e.Score, bestScore-e.Score, e.ActionDesc, r.NewsBias, r.TechTrend, r.ActionDesc,
+				)
+			} else {
+				r.Rationale = "未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨），建议结合盘中盯盘止盈信号决定去留。"
+			}
 		}
 		out = append(out, r)
 	}
