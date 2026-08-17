@@ -37,3 +37,15 @@ func TestVolatility(t *testing.T) {
 		t.Fatalf("flat series volatility should be 0, got %v", got)
 	}
 }
+
+func TestVolumeRatioPartialDayIsNeutral(t *testing.T) {
+	k := mkKlines([]float64{1, 1, 1, 1, 1, 1})
+	for i := range k {
+		k[i].Volume = 100
+	}
+	k[len(k)-1].Volume = 10
+	k[len(k)-1].IsPartial = true
+	if got := VolumeRatio(k, 5); got != 1 {
+		t.Fatalf("partial-day volume ratio=%v, want neutral 1", got)
+	}
+}

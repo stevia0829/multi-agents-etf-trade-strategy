@@ -48,7 +48,11 @@ func (w *Writer) Save(state *types.AgentState) (string, error) {
 // BuildMarkdown 暴露给单测使用：纯函数，无 IO。
 func BuildMarkdown(s *types.AgentState, now time.Time) string {
 	var b strings.Builder
-	b.WriteString("# A 股 ETF 开盘前多 Agent 策略报告\n\n")
+	if s.RunMode == "close-preview" {
+		b.WriteString("# A 股 ETF 尾盘决策报告\n\n")
+	} else {
+		b.WriteString("# A 股 ETF 开盘前多 Agent 策略报告\n\n")
+	}
 	b.WriteString(fmt.Sprintf("- 生成时间: `%s`\n", now.Format("2006-01-02 15:04:05")))
 	if s.Screener != nil && !s.Screener.AsOfDate.IsZero() {
 		b.WriteString(fmt.Sprintf("- 行情基准日: `%s`\n", s.Screener.AsOfDate.Format("2006-01-02")))
@@ -56,6 +60,13 @@ func BuildMarkdown(s *types.AgentState, now time.Time) string {
 	if s.Final != nil {
 		b.WriteString(fmt.Sprintf("- 综合评分: **%.2f**  ·  建议: **`%s`**\n",
 			s.Final.OverallScore, s.Final.Recommendation))
+	}
+	if s.RunMode == "close-preview" {
+		if !s.MarketDataTime.IsZero() {
+			b.WriteString(fmt.Sprintf("- 实时行情最早时间: `%s`\n", s.MarketDataTime.Format("2006-01-02 15:04:05")))
+		}
+		b.WriteString("- 执行口径: **14:50 尾盘预估，建议在 14:56 前完成当日操作**\n")
+		b.WriteString("- 数据状态: **当天日 K 尚未收盘，实时价已覆盖临时 Close；成交量因未完成按中性处理**\n")
 	}
 	b.WriteString("\n---\n\n")
 

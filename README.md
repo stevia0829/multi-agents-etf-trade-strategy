@@ -102,7 +102,7 @@ go run . [flags]
 
 | Flag | 默认值 | 说明 |
 |---|---|---|
-| `--mode` | `advice` | 运行模式：`advice`（单次出报告） / `backtest`（历史回测） |
+| `--mode` | `advice` | 运行模式：`advice`（开盘前） / `close-preview`（14:45-14:56 尾盘决策） / `backtest` / `intraday` |
 | `--date` | 当天 | 基准日期 `YYYY-MM-DD`，可用于复盘 / 跑指定交易日 |
 | `--current-hold` | 空 | 可选：当前持仓 ETF 代码，**支持逗号分隔多持仓**（如 `159915,512660`）；用于报告"持仓对照"、Screener 持仓豁免位、FinalAgent 持仓评审、PreOpen 加仓 / 新开仓区分；**留空即跳过，系统不做任何本地持久化** |
 | `--report-dir` | `report` | 报告输出目录（同时也是 MemoryAgent 读取历史报告的目录） |
@@ -120,6 +120,9 @@ go run . [flags]
 ```bash
 # 出今天的开盘前决策
 go run .
+
+# 14:50 使用当天临时日 K + 实时价生成尾盘决策，建议 14:56 前执行
+go run . --mode close-preview
 
 # 出明早 (5/26) 开盘前决策（K 线自动 clamp 到最近收盘日）
 go run . --date 2026-05-26

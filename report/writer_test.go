@@ -85,6 +85,19 @@ func TestBuildMarkdown_HasRequiredSections(t *testing.T) {
 	}
 }
 
+func TestBuildMarkdown_ClosePreviewDisclosure(t *testing.T) {
+	state := mkState()
+	state.RunMode = "close-preview"
+	state.MarketDataPartial = true
+	state.MarketDataTime = time.Date(2026, 8, 18, 14, 50, 10, 0, time.Local)
+	md := BuildMarkdown(state, time.Date(2026, 8, 18, 14, 50, 20, 0, time.Local))
+	for _, want := range []string{"尾盘决策报告", "14:56 前", "尚未收盘", "实时价已覆盖"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("close-preview markdown should contain %q", want)
+		}
+	}
+}
+
 func TestWriter_Save(t *testing.T) {
 	dir := filepath.Join(os.TempDir(), "etf-report-test")
 	defer os.RemoveAll(dir)

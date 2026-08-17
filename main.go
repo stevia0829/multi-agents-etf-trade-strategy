@@ -27,7 +27,7 @@ func main() {
 		skipReport  = flag.Bool("skip-report", false, "仅打印结果，不落地报告")
 		currentHold = flag.String("current-hold", "", "可选：当前持仓 ETF 代码（支持多个，逗号分隔，如 159915,512660），用于在报告中给出持仓对照与 FinalAgent 持仓评审；留空则跳过该章节，系统不做任何本地持久化")
 		holdFile    = flag.String("hold-file", "holding.json", "持仓文件路径（由 claw/微信桥维护）。intraday 模式下优先于 --current-hold 读取；格式 {\"holds\":[\"159915\",...]} 或裸数组 [\"...\"]；文件不存在则回退到 --current-hold")
-		mode        = flag.String("mode", "advice", "运行模式：advice（默认，单次出报告） / backtest（历史胜率回测） / intraday（盘中实时盯盘）")
+		mode        = flag.String("mode", "advice", "运行模式：advice（默认） / close-preview（14:50 尾盘决策） / backtest / intraday")
 		btStart     = flag.String("bt-start", "", "backtest 起始日 (YYYY-MM-DD)")
 		btEnd       = flag.String("bt-end", "", "backtest 结束日 (YYYY-MM-DD)，默认 --date 或今天")
 		btStep      = flag.Int("bt-step", 5, "backtest 采样间隔（交易日，状态化模式下忽略）")
@@ -46,6 +46,22 @@ func main() {
 	if *mode == "intraday" {
 		runIntraday(*currentHold, *holdFile, *skipReport, *reportDir)
 		return
+	}
+	if *mode != "advice" && *mode != "close-preview" {
+		fmt.Println("invalid --mode, expect advice / close-preview / backtest / intraday")
+		os.Exit(2)
+	}
+	closePreview := *mode == "close-preview"
+	if closePreview && *dateFlag != "" {
+		fmt.Println("close-preview 只支持当天实时运行，不能传 --date")
+		os.Exit(2)
+	}
+	now := time.Now()
+	if closePreview {
+		if err := validateClosePreviewTime(now); err != nil {
+			fmt.Println(err)
+			os.Exit(2)
+		}
 	}
 
 	asOf := time.Time{}
@@ -69,7 +85,11 @@ func main() {
 	}
 
 	cfg := config.Load()
-	fmt.Println("=== A 股 ETF 开盘前多 Agent 分析 ===")
+	if closePreview {
+		fmt.Println("=== A 股 ETF 尾盘多 Agent 决策（当日执行） ===")
+	} else {
+		fmt.Println("=== A 股 ETF 开盘前多 Agent 分析 ===")
+	}
 	fmt.Printf("主模型: %s/%s\n", cfg.LLM.Primary.Name, cfg.LLM.Primary.Model)
 	if len(cfg.LLM.Fallbacks) > 0 {
 		fmt.Print("降级链: ")
@@ -85,12 +105,23 @@ func main() {
 	} else {
 		fmt.Printf("基准日期: %s (回测/复盘模式)\n", asOf.Format("2006-01-02"))
 	}
-	fmt.Println("时间:", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Println("时间:", now.Format("2006-01-02 15:04:05"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := pipelineContext(now, closePreview)
 	defer cancel()
 
-	pipe, err := orchestrator.NewPipeline(cfg)
+	var pipe *orchestrator.Pipeline
+	var closeDS *datasource.ClosePreviewDataSource
+	var err error
+	if closePreview {
+		baseDS := datasource.NewEastMoneyDataSource()
+		closeDS, err = datasource.NewClosePreviewDataSource(baseDS)
+		if err == nil {
+			pipe, err = orchestrator.NewPipelineWithDataSource(cfg, closeDS)
+		}
+	} else {
+		pipe, err = orchestrator.NewPipeline(cfg)
+	}
 	if err != nil {
 		fmt.Println("init pipeline error:", err)
 		os.Exit(1)
@@ -103,6 +134,15 @@ func main() {
 	if err != nil {
 		fmt.Println("pipeline error:", err)
 		os.Exit(1)
+	}
+	if closePreview {
+		if err := closeDS.ValidateSnapshot(time.Now()); err != nil {
+			fmt.Println("pipeline error:", err)
+			os.Exit(1)
+		}
+		state.RunMode = "close-preview"
+		state.MarketDataTime = closeDS.SnapshotTime()
+		state.MarketDataPartial = true
 	}
 
 	// 持仓对照（无状态：仅本次会话使用 --current-hold 传入的值）
@@ -192,6 +232,26 @@ func main() {
 			fmt.Println("📄 Markdown 报告已生成:", path)
 		}
 	}
+}
+
+func validateClosePreviewTime(now time.Time) error {
+	start := time.Date(now.Year(), now.Month(), now.Day(), 14, 45, 0, 0, now.Location())
+	end := time.Date(now.Year(), now.Month(), now.Day(), 14, 56, 59, 0, now.Location())
+	if now.Before(start) || now.After(end) {
+		return fmt.Errorf("close-preview 仅允许在交易日 14:45:00-14:56:59 运行，当前时间 %s", now.Format("15:04:05"))
+	}
+	return nil
+}
+
+func pipelineContext(now time.Time, closePreview bool) (context.Context, context.CancelFunc) {
+	deadline := now.Add(5 * time.Minute)
+	if closePreview {
+		marketDeadline := time.Date(now.Year(), now.Month(), now.Day(), 14, 56, 30, 0, now.Location())
+		if marketDeadline.Before(deadline) {
+			deadline = marketDeadline
+		}
+	}
+	return context.WithDeadline(context.Background(), deadline)
 }
 
 func printJSON(label string, v interface{}) {

@@ -28,6 +28,8 @@ type KLine struct {
 	Low    float64   `json:"low"`
 	Close  float64   `json:"close"`
 	Volume float64   `json:"volume"`
+	// IsPartial 表示该日 K 尚未收盘，只能用于尾盘预估信号。
+	IsPartial bool `json:"is_partial,omitempty"`
 }
 
 type ScoredETF struct {
@@ -144,13 +146,19 @@ type FinalPick struct {
 }
 
 type AgentState struct {
-	Screener  *ScreenerResult       `json:"screener,omitempty"`
-	News      *NewsAnalysis         `json:"news,omitempty"`
-	Global    *GlobalMarketAnalysis `json:"global,omitempty"`
-	Tech      *TechnicalAnalysis    `json:"tech,omitempty"`
-	Regime    *RegimeAnalysis       `json:"regime,omitempty"`
-	MoneyFlow *MoneyFlowAnalysis    `json:"money_flow,omitempty"`
-	Final     *FinalDecision        `json:"final,omitempty"`
+	// RunMode 标记报告的执行语义；close-preview 表示尾盘预估、当日执行。
+	RunMode string `json:"run_mode,omitempty"`
+	// MarketDataTime 是尾盘模式使用的最早实时报价时间，用于暴露数据新鲜度。
+	MarketDataTime time.Time `json:"market_data_time,omitempty"`
+	// MarketDataPartial 表示核心计算使用了尚未收盘的当天临时日 K。
+	MarketDataPartial bool                  `json:"market_data_partial,omitempty"`
+	Screener          *ScreenerResult       `json:"screener,omitempty"`
+	News              *NewsAnalysis         `json:"news,omitempty"`
+	Global            *GlobalMarketAnalysis `json:"global,omitempty"`
+	Tech              *TechnicalAnalysis    `json:"tech,omitempty"`
+	Regime            *RegimeAnalysis       `json:"regime,omitempty"`
+	MoneyFlow         *MoneyFlowAnalysis    `json:"money_flow,omitempty"`
+	Final             *FinalDecision        `json:"final,omitempty"`
 	// NewsList 对 Top5 的逐只批量消息面分析。
 	NewsList []NewsAnalysis `json:"news_list,omitempty"`
 	// TechList 对 Top5 的逐只批量技术面分析。

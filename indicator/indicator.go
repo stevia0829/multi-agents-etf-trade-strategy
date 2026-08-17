@@ -105,6 +105,11 @@ func VolumeRatio(klines []types.KLine, n int) float64 {
 	if len(klines) < n+1 {
 		return 1
 	}
+	// 尾盘预估使用的是未完成日 K，累计成交量与完整交易日不可直接比较。
+	// 返回中性值，避免未完成量对筛选和技术面造成系统性偏差。
+	if klines[len(klines)-1].IsPartial {
+		return 1
+	}
 	avgVol := 0.0
 	for i := len(klines) - n - 1; i < len(klines)-1; i++ {
 		avgVol += klines[i].Volume

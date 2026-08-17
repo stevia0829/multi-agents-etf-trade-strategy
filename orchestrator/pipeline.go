@@ -33,7 +33,11 @@ type Pipeline struct {
 // LLM 客户端使用 Resilient 包装：主模型 + 多个备选模型 + 静态兜底。
 func NewPipeline(cfg *config.Config) (*Pipeline, error) {
 	ds := datasource.ETFDataSource(datasource.NewEastMoneyDataSource())
+	return NewPipelineWithDataSource(cfg, ds)
+}
 
+// NewPipelineWithDataSource 使用调用方提供的数据源构建流水线，供尾盘模式注入严格时点校验层。
+func NewPipelineWithDataSource(cfg *config.Config, ds datasource.ETFDataSource) (*Pipeline, error) {
 	client, err := cfg.LLM.Build(staticFallback)
 	if err != nil {
 		return nil, fmt.Errorf("build llm client: %w", err)
