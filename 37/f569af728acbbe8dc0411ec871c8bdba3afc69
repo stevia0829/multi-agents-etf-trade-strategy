@@ -1,9 +1,21 @@
+indicator/indicator.go
+  s_aa2372272e70b0::t_ae6933e0ef48ad 108-112
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.4",
+  "git_ai_version": "1.6.10",
   "base_commit_sha": "37f569af728acbbe8dc0411ec871c8bdba3afc69",
   "prompts": {},
+  "sessions": {
+    "s_aa2372272e70b0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00ef1-5658-7753-a859-4b96cca4ec3c",
+        "model": "unknown"
+      },
+      "human_author": "stevia0829 <1044686276@qq.com>"
+    }
+  },
   "attestation_metadata": {},
   "remote_transcripts": {}
 }
