@@ -66,19 +66,26 @@ type NewsAnalysis struct {
 }
 
 type GlobalMarketAnalysis struct {
-	USPrev    MarketSnapshot `json:"us_prev"`
-	JPToday   MarketSnapshot `json:"jp_today"`
-	KRToday   MarketSnapshot `json:"kr_today"`
-	Sentiment string         `json:"sentiment"`
-	Score     float64        `json:"score"`
-	Summary   string         `json:"summary"`
+	Snapshots []MarketSnapshot `json:"snapshots,omitempty"`
+	USPrev    MarketSnapshot   `json:"us_prev"`
+	JPToday   MarketSnapshot   `json:"jp_today"`
+	KRToday   MarketSnapshot   `json:"kr_today"`
+	Sentiment string           `json:"sentiment"`
+	Score     float64          `json:"score"`
+	Summary   string           `json:"summary"`
 }
 
 type MarketSnapshot struct {
-	Index    string  `json:"index"`
-	Change   float64 `json:"change"`
-	ChangePc float64 `json:"change_pct"`
-	Note     string  `json:"note"`
+	Last        float64 `json:"last,omitempty"`
+	PrevClose   float64 `json:"prev_close,omitempty"`
+	TradingDate string  `json:"trading_date,omitempty"`
+	AsOf        string  `json:"as_of,omitempty"`
+	Source      string  `json:"source,omitempty"`
+	Status      string  `json:"status,omitempty"`
+	Index       string  `json:"index"`
+	Change      float64 `json:"change"`
+	ChangePc    float64 `json:"change_pct"`
+	Note        string  `json:"note"`
 }
 
 type TechnicalAnalysis struct {

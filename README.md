@@ -110,9 +110,23 @@ HTML 为独立文件，不加载外部脚本或字体，可直接打开或通过
 go run ./cmd/check-smallcap       # 中证1000/2000日线与动量诊断
 go run ./cmd/momentum-scan        # 全池动量扫描
 go run ./cmd/rotation-backtest --help
+go run ./cmd/global-index-check   # 只读检查六个海外指数、时间戳及失败原因
 ```
 
 这些命令与每日 advice 独立运行，不会修改线上参数。裸动量回测不包含模型新闻分析和人工执行判断，不能当成完整线上 advice 的历史复现。
+
+海外指数主源为东方财富公开行情接口，一次查询标普500、纳斯达克100、道指、日经225、KOSPI及恒生；失败项再尝试腾讯（恒生/上证）和Yahoo。直接使用Go标准库，不需要安装AKShare或配置付费Key。接口为公开行情服务，并非可用性保证；来源、真实报价时间、交易日和降级错误会保留。
+
+代码映射特别注意：东方财富`100.NDX100` / Yahoo`^NDX`才是纳斯达克100，不能用`100.NDX` / `^IXIC`的综合指数代替；韩国KOSPI为`100.KS11` / `^KS11`。涨跌幅按前一交易日收盘计算，不使用开盘价或多日窗口起点。美股仅使用已结束的交易时段；历史查询不允许用当日下午收盘回填早盘，亚太休市时明确标为最近交易日数据。
+
+服务器可独立复现网络问题，不调用模型：
+
+```bash
+go run ./cmd/global-index-check --json
+go run ./cmd/global-index-check --as-of '2026-11-02T08:50:00+08:00'
+```
+
+`--as-of`用于校验来源数据是否在查询时刻已可用，不是历史分钟行情接口。美股提前收市日按标准16:00保守确认；尚未引入完整交易所休市日历。主源来自[AKShare全球指数实现](https://github.com/akfamily/akshare/blob/master/akshare/index/index_global_em.py)所用公开接口，纳指100映射另以东方财富证券搜索接口核实。
 
 ### 3. 命令行参数
 

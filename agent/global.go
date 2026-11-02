@@ -39,7 +39,8 @@ const globalSystemPrompt = `你是一名"跨境宏观策略师"，模板取自�
 
 约束：
 - 必须严格使用用户输入中"真实指数行情"块的数字，不得自行编造数字；
-- 若某指数标记为 [unavailable]，summary 中必须显式指出"该项数据缺失"；
+- 若某指数标记为 [unavailable]，summary 中必须显式指出该项数据缺失，不得用0涨跌代替；
+- previous_session 是最近交易日数据，不能称为今日盘中；引用数据时保留交易日和来源；
 - 仅输出严格 JSON，禁止 markdown，禁止解释；
 - 数字字段保留 2 位小数；change_pct 用百分比数值（例如 +0.85 表示 +0.85%）。
 
@@ -116,36 +117,41 @@ func formatIndexQuotes(quotes map[string]datasource.IndexQuote) string {
 		"SPX":   "美股前一日 标普500",
 		"NDX":   "美股前一日 纳指100",
 		"DJI":   "美股前一日 道指",
-		"N225":  "今日盘中 日经225",
-		"KOSPI": "今日盘中 韩国KOSPI",
-		"HSI":   "今日盘中 恒生指数",
+		"N225":  "日经225",
+		"KOSPI": "韩国KOSPI",
+		"HSI":   "恒生指数",
 	}
 	var b strings.Builder
 	for _, k := range order {
 		q, ok := quotes[k]
 		label := labels[k]
 		if !ok || q.Last <= 0 {
-			fmt.Fprintf(&b, "- %s: [unavailable]（接口未返回数据，请在 summary 中标注缺失）\n", label)
+			fmt.Fprintf(&b, "- %s: [unavailable]（%s；请在summary中标注缺失）\n", label, q.Error)
 			continue
 		}
-		fmt.Fprintf(&b, "- %s: 最新=%.2f, 前值=%.2f, 涨跌=%+.2f (%+.2f%%), 数据源=%s, 时间=%s\n",
+		fmt.Fprintf(&b, "- %s: 最新=%.2f, 前收盘=%.2f, 涨跌=%+.2f (%+.2f%%), 数据源=%s, 时间=%s, 交易日=%s, 状态=%s\n",
 			label, q.Last, q.PrevClose, q.Change, q.ChangePct*100,
-			q.Source, q.Time.Format("2006-01-02 15:04"))
+			q.Source, q.Time.Format(time.RFC3339), q.TradingDate, q.Status)
 	}
 	return b.String()
 }
 
 // overrideSnapshotsWithReal 用真实数据覆盖 LLM 输出，避免 LLM 又把数字写歪。
 func overrideSnapshotsWithReal(res *types.GlobalMarketAnalysis, quotes map[string]datasource.IndexQuote) {
-	if q, ok := quotes["SPX"]; ok && q.Last > 0 {
-		res.USPrev = types.MarketSnapshot{Index: "SPX", Change: round2(q.Change), ChangePc: round2(q.ChangePct * 100), Note: snapshotNote(q)}
+	res.Snapshots = nil
+	for _, key := range []string{"SPX", "NDX", "DJI", "N225", "KOSPI", "HSI"} {
+		res.Snapshots = append(res.Snapshots, realMarketSnapshot(key, quotes[key]))
 	}
-	if q, ok := quotes["N225"]; ok && q.Last > 0 {
-		res.JPToday = types.MarketSnapshot{Index: "N225", Change: round2(q.Change), ChangePc: round2(q.ChangePct * 100), Note: snapshotNote(q)}
+	res.USPrev = realMarketSnapshot("SPX", quotes["SPX"])
+	res.JPToday = realMarketSnapshot("N225", quotes["N225"])
+	res.KRToday = realMarketSnapshot("KOSPI", quotes["KOSPI"])
+}
+
+func realMarketSnapshot(key string, q datasource.IndexQuote) types.MarketSnapshot {
+	if q.Last <= 0 {
+		return types.MarketSnapshot{Index: key, Source: q.Source, Status: "unavailable", Note: "数据缺失：" + q.Error}
 	}
-	if q, ok := quotes["KOSPI"]; ok && q.Last > 0 {
-		res.KRToday = types.MarketSnapshot{Index: "KOSPI", Change: round2(q.Change), ChangePc: round2(q.ChangePct * 100), Note: snapshotNote(q)}
-	}
+	return types.MarketSnapshot{Index: key, Last: q.Last, PrevClose: q.PrevClose, Change: round2(q.Change), ChangePc: round2(q.ChangePct * 100), TradingDate: q.TradingDate, AsOf: q.Time.Format(time.RFC3339), Source: q.Source, Status: q.Status, Note: snapshotNote(q)}
 }
 
 func snapshotNote(q datasource.IndexQuote) string {
@@ -175,13 +181,6 @@ func round2(v float64) float64 {
 //   - <= -0.5% → negative, score 35 - 跌幅放大
 //   - 其他 → neutral
 func ruleBasedGlobalFromQuotes(quotes map[string]datasource.IndexQuote) *types.GlobalMarketAnalysis {
-	snap := func(k string) types.MarketSnapshot {
-		q := quotes[k]
-		if q.Last <= 0 {
-			return types.MarketSnapshot{Index: k, Note: "数据缺失"}
-		}
-		return types.MarketSnapshot{Index: k, Change: round2(q.Change), ChangePc: round2(q.ChangePct * 100), Note: snapshotNote(q)}
-	}
 	pcts := []float64{}
 	notes := []string{}
 	for _, k := range []string{"SPX", "NDX", "N225", "KOSPI"} {
@@ -211,14 +210,13 @@ func ruleBasedGlobalFromQuotes(quotes map[string]datasource.IndexQuote) *types.G
 	} else {
 		summary += "所有指数均拉取失败，按中性处理。"
 	}
-	return &types.GlobalMarketAnalysis{
-		USPrev:    snap("SPX"),
-		JPToday:   snap("N225"),
-		KRToday:   snap("KOSPI"),
+	res := &types.GlobalMarketAnalysis{
 		Sentiment: sentiment,
 		Score:     score,
 		Summary:   summary,
 	}
+	overrideSnapshotsWithReal(res, quotes)
+	return res
 }
 
 func clamp01_100(v float64) float64 {
@@ -231,56 +229,14 @@ func clamp01_100(v float64) float64 {
 	return v
 }
 
-// applyCalendarSemantics 按"查询锚点"做语义日历过滤，避免把不同交易日的数据塞错槽位。
-//
-//	asOfDay = AsOf 的 0 点（按 UTC 比较，规避时区抖动）
-//	- 亚太指数(N225/KOSPI/HSI)：允许 q.Time 在 asOfDay 当日 或 之前的近 7 个自然日（覆盖周末+节假日）。
-//	  原因：stooq 的亚太日 K 快照常在北京时间 16:45 才推送，且当日可能是法定假日（Korea/HK 5/25
-//	  恰逢佛诞替换休市），此时 stooq 给的就是上一交易日 close。这种数据是合法可用的"最近一交易日"。
-//	- 美股指数(SPX/NDX/DJI)：必须 q.Time 严格早于 asOfDay（UTC），否则丢弃，避免把当日盘中误读成"昨日收盘"。
-//
-// 丢弃即把该 symbol 从 map 中删除，formatIndexQuotes 会显示 [unavailable]。
+// applyCalendarSemantics 按真实报价时间校验，保留已收盘美股并排除未来快照。
 func applyCalendarSemantics(quotes map[string]datasource.IndexQuote, asOf time.Time) {
-	asOfUTC := asOf.UTC()
-	dayY, dayM, dayD := asOfUTC.Date()
-	asOfDay := time.Date(dayY, dayM, dayD, 0, 0, 0, 0, time.UTC)
-	withinAsiaWindow := func(t time.Time) bool {
-		// 允许：q.Time 当天 或 过去 7 天内（含周末/节假日缓冲）；不允许 q.Time 严格晚于 asOfDay。
-		ty, tm, td := t.UTC().Date()
-		tDay := time.Date(ty, tm, td, 0, 0, 0, 0, time.UTC)
-		if tDay.After(asOfDay) {
-			return false
-		}
-		return asOfDay.Sub(tDay) <= 7*24*time.Hour
-	}
-	beforeDay := func(t time.Time) bool {
-		y, m, d := t.UTC().Date()
-		if y != dayY {
-			return y < dayY
-		}
-		if m != dayM {
-			return m < dayM
-		}
-		return d < dayD
-	}
-	asiaToday := []string{"N225", "KOSPI", "HSI"}
-	usPrev := []string{"SPX", "NDX", "DJI"}
-	for _, k := range asiaToday {
-		q, ok := quotes[k]
-		if !ok || q.Last <= 0 {
+	for key, q := range quotes {
+		if q.Last <= 0 {
 			continue
 		}
-		if q.Time.IsZero() || !withinAsiaWindow(q.Time) {
-			delete(quotes, k)
-		}
-	}
-	for _, k := range usPrev {
-		q, ok := quotes[k]
-		if !ok || q.Last <= 0 {
-			continue
-		}
-		if q.Time.IsZero() || !beforeDay(q.Time) {
-			delete(quotes, k)
+		if err := datasource.ValidateIndexQuoteAsOf(q, asOf); err != nil {
+			quotes[key] = datasource.IndexQuote{Symbol: key, Source: "unavailable", Error: err.Error()}
 		}
 	}
 }

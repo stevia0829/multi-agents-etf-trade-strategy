@@ -1,6 +1,7 @@
 package report
 
 import (
+	htmlstd "html"
 	"strings"
 	"testing"
 	"time"
@@ -54,5 +55,27 @@ func TestHTMLReportHandlesMissingAnalysis(t *testing.T) {
 	}
 	if !strings.Contains(got, "数据尚不完整") {
 		t.Fatal("missing-data state not disclosed")
+	}
+}
+
+func TestReportsShowIndexDatesSourcesAndMissingValues(t *testing.T) {
+	st := mkState()
+	st.Global.Snapshots = []types.MarketSnapshot{
+		{Index: "NDX", Last: 110, PrevClose: 100, ChangePc: 10, TradingDate: "2026-10-30", AsOf: "2026-10-31T04:00:00+08:00", Source: "eastmoney", Status: "previous_session"},
+		{Index: "KOSPI", Source: "unavailable", Status: "unavailable", Note: "HTTP 503"},
+	}
+	html, err := BuildHTML(st, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := BuildMarkdown(st, time.Now())
+	html = htmlstd.UnescapeString(html)
+	for _, want := range []string{"NDX", "KOSPI", "2026-10-30", "eastmoney", "2026-10-31T04:00:00+08:00"} {
+		if !strings.Contains(html, want) || !strings.Contains(md, want) {
+			t.Fatalf("missing %s", want)
+		}
+	}
+	if !strings.Contains(html, "最近交易日") || !strings.Contains(md, "KOSPI | — | —") {
+		t.Fatal("missing data shown as flat market")
 	}
 }
