@@ -102,11 +102,14 @@ type FinalDecision struct {
 	TechAnalysis   TechnicalAnalysis    `json:"tech_analysis"`
 	OverallScore   float64              `json:"overall_score"`
 	Recommendation string               `json:"recommendation"`
-	EntryPrice     float64              `json:"entry_price"`
-	StopLoss       float64              `json:"stop_loss"`
-	TakeProfit     float64              `json:"take_profit"`
-	Reasoning      string               `json:"reasoning"`
-	GeneratedAt    time.Time            `json:"generated_at"`
+	// 基础建议与风险过滤依据由代码统一计算，便于区分标的强弱和是否允许交易。
+	BaseRecommendation string    `json:"base_recommendation,omitempty"`
+	DecisionNotes      []string  `json:"decision_notes,omitempty"`
+	EntryPrice         float64   `json:"entry_price"`
+	StopLoss           float64   `json:"stop_loss"`
+	TakeProfit         float64   `json:"take_profit"`
+	Reasoning          string    `json:"reasoning"`
+	GeneratedAt        time.Time `json:"generated_at"`
 	// 加权分数明细
 	ScoreBreakdown map[string]float64 `json:"score_breakdown"`
 	// Picks 投委会精选 1~2 支推荐买入标的（来自 Top5）。
@@ -125,7 +128,7 @@ type HoldReview struct {
 	InTop      bool    `json:"in_top"`      // 是否进入当日 Top5
 	Rank       int     `json:"rank"`        // 在合并候选列表中的名次（1-based）
 	Score      float64 `json:"score"`       // 候选量化分（与 Top5 同一量纲）
-	Action     string  `json:"action"`      // 客观建议: keep / trim / rotate
+	Action     string  `json:"action"`      // keep / trim / rotate / observe（缺少独立数据）
 	ActionDesc string  `json:"action_desc"` // 中文人话
 	NewsBias   string  `json:"news_bias"`   // positive / neutral / negative / unknown
 	TechTrend  string  `json:"tech_trend"`  // up / flat / down / unknown

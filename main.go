@@ -23,7 +23,7 @@ func main() {
 	var (
 		dateFlag    = flag.String("date", "", "回测/复盘的基准日期 (YYYY-MM-DD)，为空时取当天最新行情")
 		timeFlag    = flag.String("time", "09:30", "模拟运行时刻 (HH:MM, 24h, 仅 advice 模式生效)，作为指数/数据源 AsOf 锚点")
-		reportDir   = flag.String("report-dir", "report", "Markdown 报告输出目录")
+		reportDir   = flag.String("report-dir", "report", "HTML / Markdown / JSON 报告输出目录")
 		skipReport  = flag.Bool("skip-report", false, "仅打印结果，不落地报告")
 		currentHold = flag.String("current-hold", "", "可选：当前持仓 ETF 代码（支持多个，逗号分隔，如 159915,512660），用于在报告中给出持仓对照与 FinalAgent 持仓评审；留空则跳过该章节，系统不做任何本地持久化")
 		holdFile    = flag.String("hold-file", "holding.json", "持仓文件路径（由 claw/微信桥维护）。intraday 模式下优先于 --current-hold 读取；格式 {\"holds\":[\"159915\",...]} 或裸数组 [\"...\"]；文件不存在则回退到 --current-hold")
@@ -151,7 +151,7 @@ func main() {
 		state.CurrentHold = holds[0]
 	}
 	if state.Screener != nil && len(holds) > 0 {
-		state.HoldAdvices = agent.BuildHoldAdvices(holds, state.Screener.Top5)
+		state.HoldAdvices = agent.BuildHoldAdvices(holds, state.Screener.Top5, state.Final)
 		if len(state.HoldAdvices) > 0 {
 			first := state.HoldAdvices[0]
 			state.HoldAdvice = &first
@@ -229,7 +229,7 @@ func main() {
 			fmt.Println("write report error:", err)
 		} else {
 			fmt.Println()
-			fmt.Println("📄 Markdown 报告已生成:", path)
+			fmt.Println("📄 HTML 报告已生成（同时保留 Markdown / JSON）:", path)
 		}
 	}
 }

@@ -178,8 +178,50 @@ func (a *PreOpenAgent) Run(ctx context.Context, state *types.AgentState) (*types
 	if a.LLM != nil {
 		_ = enrichPreOpenWithLLM(ctx, a.LLM, out)
 	}
+	applyPreOpenDecisionLimit(out, state)
 
 	return out, nil
+}
+
+// applyPreOpenDecisionLimit 防止撮合复核和模型润色重新放行主报告已否决的买入。
+// 只约束买入侧，保留已有且有独立依据的减仓复核。
+func applyPreOpenDecisionLimit(out *types.PreOpenAnalysis, state *types.AgentState) {
+	reco := CapRecommendation(state.Final.Recommendation, state.Regime)
+	allowBuy := reco == "buy" || reco == "strong_buy"
+	changed := !allowBuy
+	holds := map[string]struct{}{}
+	for _, code := range normalizePreOpenHolds(state) {
+		holds[code] = struct{}{}
+	}
+	for i := range out.Snapshots {
+		s := &out.Snapshots[i]
+		if _, held := holds[s.ETFCode]; held && (s.HoldAction == "trim" || s.HoldAction == "rotate") {
+			applyReduceRule(s, types.HoldReview{Action: s.HoldAction})
+			changed = true
+			continue
+		}
+		if s.Verdict == "reduce" {
+			// 模型不能为没有持仓减仓依据的标的凭空创建卖出计划。
+			s.SellRatio, s.AdjSellPrice, s.SellType = 0, 0, ""
+			applyVerdictRule(s, out.Market.GapPct, holds)
+			changed = true
+		}
+		if allowBuy {
+			continue
+		}
+		s.AdjEntry = 0
+		if reco == "avoid" {
+			s.Verdict = "abandon"
+			s.Note = "主报告风险否决，暂停新开仓与轮动买入"
+		} else {
+			s.Verdict = "wait_pullback"
+			s.Note = "主报告仅观察，不新增仓位"
+		}
+	}
+	if changed {
+		out.Summary = ruleBasedPreOpenSummary(out)
+		out.FinalAction = ruleBasedFinalAction(out)
+	}
 }
 
 // normalizePreOpenHolds 把 state.CurrentHolds 与旧 CurrentHold 字段合并、去空白、去重保序。
