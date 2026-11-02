@@ -92,7 +92,27 @@ export LLM_PRIMARY=custom LLM_FALLBACKS=deepseek
 go run .
 ```
 
-输出：终端打印 + 自动落地 Markdown 报告到 `report/etf-report-YYYYMMDD-HHMMSS.md`。
+输出：终端打印 + 自动生成同名 HTML、Markdown、JSON 三份报告。终端返回 HTML 阅读入口：
+
+```text
+report/etf-report-YYYYMMDD-HHMMSS.html  浏览器阅读，支持手机与打印
+report/etf-report-YYYYMMDD-HHMMSS.md    历史记忆及原有推送兼容
+report/etf-report-YYYYMMDD-HHMMSS.json  集合竞价复核及结构化读取
+```
+
+HTML 为独立文件，不加载外部脚本或字体，可直接打开或通过现有报告目录静态服务访问。若服务端历史列表只筛选 `.md`，需在该列表服务中增加 `.html` 链接；列表服务不在本仓库中。Markdown 头部也保留同名 HTML 链接。
+
+报告将“标的加权分 / 基础建议”与“风险过滤后的执行建议”分开展示。综合分及阈值由代码统一计算，模型负责解释证据。现有 `risk_off` 门槛保持不变：510300 低于120日均线且近60日最大回撤达到8%，最终 `avoid`，不生成买入精选；持仓对照和集合竞价复核均不能重新放行买入。缺少独立数据的持仓标为 `observe`，不把未覆盖误判为0分并自动减仓。
+
+### 独立诊断与回测命令
+
+```bash
+go run ./cmd/check-smallcap       # 中证1000/2000日线与动量诊断
+go run ./cmd/momentum-scan        # 全池动量扫描
+go run ./cmd/rotation-backtest --help
+```
+
+这些命令与每日 advice 独立运行，不会修改线上参数。裸动量回测不包含模型新闻分析和人工执行判断，不能当成完整线上 advice 的历史复现。
 
 ### 3. 命令行参数
 

@@ -113,7 +113,13 @@ func TestWriter_Save(t *testing.T) {
 	if info.Size() == 0 {
 		t.Fatalf("report file empty")
 	}
-	if !strings.HasSuffix(path, ".md") {
-		t.Fatalf("expect .md, got %s", path)
+	if !strings.HasSuffix(path, ".html") {
+		t.Fatalf("expect .html, got %s", path)
+	}
+	base := strings.TrimSuffix(path, ".html")
+	for _, ext := range []string{".md", ".json"} {
+		if _, err := os.Stat(base + ext); err != nil {
+			t.Fatalf("missing compatible sidecar %s: %v", ext, err)
+		}
 	}
 }

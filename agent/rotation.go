@@ -253,7 +253,7 @@ func (a RotationAction) Label() string {
 // BuildHoldAdvice 把"用户当前持仓"与本次合并后的候选列表（已含持仓豁免位）做对照，返回持仓建议。
 // 当 currentHold 为空字符串时返回 nil，调用方据此跳过对应章节。
 // 完全无状态：currentHold 仅本次会话内使用，不做任何持久化。
-func BuildHoldAdvice(currentHold string, top []types.ScoredETF) *types.HoldAdvice {
+func BuildHoldAdvice(currentHold string, top []types.ScoredETF, final ...*types.FinalDecision) *types.HoldAdvice {
 	if currentHold == "" || len(top) == 0 {
 		return nil
 	}
@@ -274,12 +274,15 @@ func BuildHoldAdvice(currentHold string, top []types.ScoredETF) *types.HoldAdvic
 		}
 	}
 	advice.Suggestion = composeHoldSuggestion(advice, top[0])
+	if len(final) > 0 {
+		*advice = GuardHoldAdvice(*advice, final[0])
+	}
 	return advice
 }
 
 // BuildHoldAdvices 在 advice 模式下为多只持仓批量生成持仓对照建议。
 // 返回顺序与 currentHolds 一致；空持仓 / 无候选时返回 nil。
-func BuildHoldAdvices(currentHolds []string, top []types.ScoredETF) []types.HoldAdvice {
+func BuildHoldAdvices(currentHolds []string, top []types.ScoredETF, final ...*types.FinalDecision) []types.HoldAdvice {
 	if len(currentHolds) == 0 || len(top) == 0 {
 		return nil
 	}
@@ -289,7 +292,7 @@ func BuildHoldAdvices(currentHolds []string, top []types.ScoredETF) []types.Hold
 		if code == "" {
 			continue
 		}
-		if a := BuildHoldAdvice(code, top); a != nil {
+		if a := BuildHoldAdvice(code, top, final...); a != nil {
 			out = append(out, *a)
 		}
 	}
@@ -297,6 +300,21 @@ func BuildHoldAdvices(currentHolds []string, top []types.ScoredETF) []types.Hold
 		return nil
 	}
 	return out
+}
+
+// GuardHoldAdvice 保留动量排名事实，但执行建议必须服从最终风险过滤。
+// 缺少最终决策时仅保留原动量对照，不推断宏观状态。
+func GuardHoldAdvice(a types.HoldAdvice, final *types.FinalDecision) types.HoldAdvice {
+	if final == nil {
+		return a
+	}
+	switch final.Recommendation {
+	case "avoid":
+		a.Suggestion = "最终风险过滤为 avoid：暂停新开仓和轮动买入。当前持仓需结合自身趋势、数据完整性及仓位规则复核，不能仅凭未进Top5决定卖出。"
+	case "hold":
+		a.Suggestion = "最终建议为 hold：持有观察，不加仓，也不执行向目标标的的轮动买入；持仓是否退出需结合独立趋势证据。"
+	}
+	return a
 }
 
 func composeHoldSuggestion(a *types.HoldAdvice, best types.ScoredETF) string {

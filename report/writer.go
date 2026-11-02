@@ -23,25 +23,31 @@ func NewWriter(dir string) *Writer {
 	return &Writer{Dir: dir}
 }
 
-// Save 生成 markdown 报告。文件名 etf-report-YYYYMMDD-HHmmss.md。
+// Save 生成同名 HTML、Markdown 和 JSON，返回主要阅读入口 HTML 的绝对路径。
+// Markdown 保持历史记忆输入，JSON 保持集合竞价复核输入。
 func (w *Writer) Save(state *types.AgentState) (string, error) {
 	if err := os.MkdirAll(w.Dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", w.Dir, err)
 	}
 	now := time.Now()
-	filename := fmt.Sprintf("etf-report-%s.md", now.Format("20060102-150405"))
-	path := filepath.Join(w.Dir, filename)
-
-	content := BuildMarkdown(state, now)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	base := fmt.Sprintf("etf-report-%s", now.Format("20060102-150405"))
+	html, err := BuildHTML(state, now)
+	if err != nil {
+		return "", err
 	}
-	// 同步落 JSON sidecar，供下游 9:24 PreOpenAgent 直接 Unmarshal 使用。
-	jsonPath := filepath.Join(w.Dir, fmt.Sprintf("etf-report-%s.json", now.Format("20060102-150405")))
-	if buf, err := json.MarshalIndent(state, "", "  "); err == nil {
-		_ = os.WriteFile(jsonPath, buf, 0o644)
+	buf, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode report JSON: %w", err)
 	}
-	abs, _ := filepath.Abs(path)
+	for _, file := range []struct{ ext, content string }{
+		{".md", BuildMarkdown(state, now)}, {".json", string(buf)}, {".html", html},
+	} {
+		path := filepath.Join(w.Dir, base+file.ext)
+		if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+			return "", fmt.Errorf("write %s: %w", path, err)
+		}
+	}
+	abs, _ := filepath.Abs(filepath.Join(w.Dir, base+".html"))
 	return abs, nil
 }
 
@@ -54,6 +60,7 @@ func BuildMarkdown(s *types.AgentState, now time.Time) string {
 		b.WriteString("# A 股 ETF 开盘前多 Agent 策略报告\n\n")
 	}
 	b.WriteString(fmt.Sprintf("- 生成时间: `%s`\n", now.Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("- HTML 阅读版: [打开报告](etf-report-%s.html)\n", now.Format("20060102-150405")))
 	if s.Screener != nil && !s.Screener.AsOfDate.IsZero() {
 		b.WriteString(fmt.Sprintf("- 行情基准日: `%s`\n", s.Screener.AsOfDate.Format("2006-01-02")))
 	}
@@ -281,6 +288,13 @@ func writeFinal(b *strings.Builder, f *types.FinalDecision) {
 	}
 	b.WriteString("## 八、加权综合评分与交易决策 (FinalAgent)\n\n")
 	b.WriteString("**多 Agent 加权打分**\n\n")
+	if f.BaseRecommendation != "" {
+		b.WriteString(fmt.Sprintf("- 代码加权分: **%.2f** · 基础建议: `%s` · 风险过滤后: **`%s`**\n", f.OverallScore, f.BaseRecommendation, f.Recommendation))
+		for _, note := range f.DecisionNotes {
+			b.WriteString("- 风险过滤依据: " + note + "\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("| 维度 | 子分数 | 权重 | 跨标调整 | 贡献分 |\n|---|---|---|---|---|\n")
 	if f.ScoreBreakdown != nil {
 		row := func(label, sk, wk, skAdj, pk string) {
@@ -292,20 +306,23 @@ func writeFinal(b *strings.Builder, f *types.FinalDecision) {
 			b.WriteString(fmt.Sprintf("| %s | %.2f | %.0f%% | %s | %.2f |\n",
 				label, f.ScoreBreakdown[sk], f.ScoreBreakdown[wk]*100, adjStr, f.ScoreBreakdown[pk]))
 		}
-		row("量化动量", "quant", "quant_weight", "quant", "quant_part")
+		row("量化动量", "quant", "quant_weight", "", "quant_part")
 		row("消息面", "news", "news_weight", "news_adj", "news_part")
-		row("跨境联动", "global", "global_weight", "global", "global_part")
+		row("跨境联动", "global", "global_weight", "", "global_part")
 		row("技术面", "tech", "tech_weight", "tech_adj", "tech_part")
 		if _, ok := f.ScoreBreakdown["regime"]; ok {
-			row("宏观环境", "regime", "regime_weight", "regime", "regime_part")
+			row("宏观环境", "regime", "regime_weight", "", "regime_part")
 		}
 		if _, ok := f.ScoreBreakdown["flow"]; ok {
-			row("资金面", "flow", "flow_weight", "flow", "flow_part")
+			row("资金面", "flow", "flow_weight", "", "flow_part")
 		}
 	}
 	b.WriteString(fmt.Sprintf("| **综合** |  |  |  | **%.2f** |\n\n", f.OverallScore))
 
 	b.WriteString("**交易价位（风险纪律）**\n\n")
+	if f.Recommendation == "avoid" {
+		b.WriteString("> 当前暂停新开仓与轮动买入；以下价位仅为研究参考，不是有效买入计划。\n\n")
+	}
 	b.WriteString(fmt.Sprintf("> 🟢 **入场价** `%.3f`\n", f.EntryPrice))
 	b.WriteString(fmt.Sprintf("> 🛑 **止损价** `%.3f`　—— 跌破即平仓，止损不可下移\n", f.StopLoss))
 	b.WriteString(fmt.Sprintf("> 🎯 **止盈价** `%.3f`　—— 到位分批止盈\n", f.TakeProfit))
@@ -381,6 +398,7 @@ func writeHoldAdvice(b *strings.Builder, s *types.AgentState) {
 	b.WriteString("## 九、与您当前持仓的对照\n\n")
 	bestCode, bestName := "", ""
 	for i, a := range advices {
+		a = agent.GuardHoldAdvice(a, s.Final)
 		if i == 0 {
 			bestCode, bestName = a.BestCode, a.BestName
 		}
@@ -426,8 +444,12 @@ func writeHoldReviews(b *strings.Builder, s *types.AgentState) {
 		if desc == "" {
 			desc = r.Action
 		}
-		b.WriteString(fmt.Sprintf("| %s | `%s` | %s | %s | %.2f | %s | %s | **`%s`**（%s） |\n",
-			r.ETFName, r.ETFCode, r.Sector, rank, r.Score, r.NewsBias, r.TechTrend, r.Action, desc))
+		score := "—"
+		if r.Rank > 0 || r.InTop {
+			score = fmt.Sprintf("%.2f", r.Score)
+		}
+		b.WriteString(fmt.Sprintf("| %s | `%s` | %s | %s | %s | %s | %s | **`%s`**（%s） |\n",
+			r.ETFName, r.ETFCode, r.Sector, rank, score, r.NewsBias, r.TechTrend, r.Action, desc))
 	}
 	b.WriteString("\n")
 	for _, r := range s.Final.HoldReviews {

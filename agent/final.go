@@ -91,14 +91,15 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
 - 当 memory 为空或样本不足（首次运行）时，无需特别说明。
 
 【综合评分 → recommendation】
-- overall_score = Σ weight_i × factor_score_i
+- 系统已给出 computed_overall_score 和 computed_base_recommendation；直接引用，不得重新计算或主观改分。
+- overall_score = Σ weight_i × factor_score_i，最终由代码校验，模型只负责解释证据和候选差异。
 - 消息面 / 技术面的 factor_score 必须做**跨标校准**：
   先看 news_list / tech_list 中其他候选的 Score 均值，再决定 target 的两因子贡献：
   · target 的 news/tech score 显著高于 peers（高出 15%+）→ 该因子贡献 +5%~+10%
   · target 显著低于 peers（低出 15%+）→ 该因子贡献 -5%~-10%
   · 无显著差异（±15% 以内）→ 不做调整
   这是 Simons 派的"因子相对强度"逻辑：孤立看 70 分没有意义，关键看同类是 50 还是 75。
-- 映射： >=80 strong_buy / >=65 buy / >=50 hold / 否则 avoid
+- 映射： >=70 strong_buy / >=40 buy / >=25 hold / 否则 avoid
 - 当 regime.trend == "risk_off" 时强制 avoid（达利欧派一票否决）；
   regime.trend == "bear" 时降一档（strong_buy/buy → hold）
 - 当 target.premium_pct >= 0.03（+3%）时，strong_buy/buy 强制降为 hold；
@@ -156,7 +157,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
       "in_top": true/false,
       "rank": 1-based 在合并候选列表的名次,
       "score": 候选量化分,
-      "action": "keep | trim | rotate",
+      "action": "keep | trim | rotate | observe",
       "action_desc": "中文人话（如：继续持有 / 减仓观察 / 平仓切换）",
       "news_bias": "positive | neutral | negative | unknown",
       "tech_trend": "up | flat | down | unknown",
@@ -170,7 +171,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
 - reasoning 中提到的"数字 / 政策 / 资金流"必须能从用户输入中找到出处，不得编造；
 - 禁止使用"据悉/据传/可能/预计"等无来源虚词（巴菲特派的求实纪律）；
 - 必须在 reasoning 中至少显式提及 2 位委员的判据（如"趋势派看到多头排列"、"价值派提示溢价偏高"）；
-- picks 数组必须包含 1~2 支标的，且必须从输入的 screener.top5 中选出；
+- 最终建议 avoid 时 picks 必须为 []；其他状态可从输入的 top5 返回 1~2 支候选，hold 仅供观察、不建议新增。
   · 第 1 支默认就是当前 best（target），但 rationale 必须给出"它在 Top5 中胜出的具体理由"；
   · 第 2 支为可选的"备选 / 分散仓位"标的，板块或风格应与第 1 支有差异（避免双倍下注同一风险因子）；
   · 若 Top5 中除 best 外没有任何标的同时满足 trend != down 且 sentiment != negative，
@@ -182,6 +183,7 @@ const finalSystemPrompt = `你是一名拥有 20 年实战经验的"首席投资
     trim = 信号弱化或消息中性偏弱，建议减仓观望，保留少量底仓；
     rotate = 信号反转 / 趋势 down / 消息 negative / 量化分明显落后 best，建议平仓切换；
   · rationale 必须显式引用：候选量化分（绝对 + 与 best 的差距）+ news_list 中匹配项的 sentiment + tech_list 中匹配项的 trend；
+  · 不在候选中且缺少独立数据的持仓只能 observe（数据不足，暂不判定）；不得把缺失分数当成0分或据此减仓、切换；
   · 严禁让 hold_reviews 改变 recommendation / picks / 价格方案。`
 
 func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.FinalDecision, error) {
@@ -193,6 +195,8 @@ func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.Fina
 	relevance := FactorRelevanceNote(target.ETF.Sector)
 
 	payload, _ := json.MarshalIndent(map[string]interface{}{
+		"computed_overall_score":       weightedScore(st),
+		"computed_base_recommendation": RuleRecommend(weightedScore(st)),
 		"target": map[string]interface{}{
 			"code":         target.ETF.Code,
 			"name":         target.ETF.Name,
@@ -247,16 +251,11 @@ func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.Fina
 		return dec, nil
 	}
 
-	// 缺失字段补齐
-	if dec.OverallScore == 0 {
-		dec.OverallScore = weightedScore(st)
-	}
-	if dec.Recommendation == "" {
-		dec.Recommendation = RuleRecommend(dec.OverallScore)
-	}
-	dec.Recommendation = CapRecommendation(dec.Recommendation, st.Regime)
+	// 评分、阈值和宏观否决由代码统一执行，模型输出不能覆盖交易规则。
+	applyScoreAndRegime(dec, st)
 	if capped, note := CapByPremium(dec.Recommendation, target.ETF.PremiumPct); note != "" {
 		dec.Recommendation = capped
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 		if dec.Reasoning != "" {
 			dec.Reasoning += " "
 		}
@@ -275,12 +274,14 @@ func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.Fina
 	dec.StopLoss, dec.TakeProfit = clampStopTake(target.ETF.Price, dec.StopLoss, dec.TakeProfit)
 	if capped, note := CapByPullbackCooldownForState(dec.Recommendation, target, st); note != "" {
 		dec.Recommendation = capped
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 		if dec.Reasoning != "" {
 			dec.Reasoning += " "
 		}
 		dec.Reasoning += "【回撤冷却】" + note + "。"
 	}
 	if _, note := CapByRiskReward(dec.Recommendation, dec.EntryPrice, dec.StopLoss, dec.TakeProfit); note != "" {
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 		if dec.Reasoning != "" {
 			dec.Reasoning += " "
 		}
@@ -292,6 +293,7 @@ func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.Fina
 	dec.TechAnalysis = derefT(st.Tech)
 	dec.GeneratedAt = time.Now()
 	dec.ScoreBreakdown = scoreBreakdown(st)
+	dec.Reasoning = appendPickRiskNote(dec.Reasoning, fmt.Sprintf("代码统一结论：综合分 %.2f，基础建议 %s，风险过滤后 %s；执行以此结论及风险过滤依据为准", dec.OverallScore, dec.BaseRecommendation, dec.Recommendation))
 	// LLM 未返回 picks 时，规则兜底：基于 Top5 + NewsList + TechList 自动选 1-2 支。
 	if len(dec.Picks) == 0 {
 		dec.Picks = fallbackPicks(st, dec)
@@ -304,6 +306,7 @@ func (a *FinalAgent) Run(ctx context.Context, st *types.AgentState) (*types.Fina
 	} else {
 		dec.HoldReviews = sanitizeHoldReviews(dec.HoldReviews, st)
 	}
+	guardHoldReviewRotation(dec)
 	return dec, nil
 }
 
@@ -314,18 +317,18 @@ func ruleBasedFinal(dec *types.FinalDecision, st *types.AgentState) {
 // RuleBasedDecision 暴露规则版决策，供回测引擎复用（不依赖 LLM）。
 func RuleBasedDecision(dec *types.FinalDecision, st *types.AgentState) {
 	target := st.Screener.Best
-	dec.OverallScore = weightedScore(st)
-	dec.Recommendation = RuleRecommend(dec.OverallScore)
-	dec.Recommendation = CapRecommendation(dec.Recommendation, st.Regime)
+	applyScoreAndRegime(dec, st)
 	premiumNote := ""
 	if capped, note := CapByPremium(dec.Recommendation, target.ETF.PremiumPct); note != "" {
 		dec.Recommendation = capped
 		premiumNote = note
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 	}
 	cooldownNote := ""
 	if capped, note := CapByPullbackCooldownForState(dec.Recommendation, target, st); note != "" {
 		dec.Recommendation = capped
 		cooldownNote = note
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 	}
 	dec.EntryPrice = target.ETF.Price
 	dec.StopLoss = DefaultStopLoss(target)
@@ -333,6 +336,7 @@ func RuleBasedDecision(dec *types.FinalDecision, st *types.AgentState) {
 	rrNote := ""
 	if _, note := CapByRiskReward(dec.Recommendation, dec.EntryPrice, dec.StopLoss, dec.TakeProfit); note != "" {
 		rrNote = note
+		dec.DecisionNotes = append(dec.DecisionNotes, note)
 	}
 	dec.ScoreBreakdown = scoreBreakdown(st)
 	w := WeightsForSector(target.ETF.Sector)
@@ -361,9 +365,42 @@ func RuleBasedDecision(dec *types.FinalDecision, st *types.AgentState) {
 	}
 	if len(dec.Picks) == 0 {
 		dec.Picks = fallbackPicks(st, dec)
+	} else {
+		dec.Picks = sanitizePicks(dec.Picks, st, dec)
 	}
 	if len(dec.HoldReviews) == 0 {
 		dec.HoldReviews = buildHoldReviewsFallback(st)
+	}
+	guardHoldReviewRotation(dec)
+}
+
+func guardHoldReviewRotation(dec *types.FinalDecision) {
+	if dec.Recommendation != "avoid" && dec.Recommendation != "hold" {
+		return
+	}
+	for i := range dec.HoldReviews {
+		r := &dec.HoldReviews[i]
+		if r.Action == "rotate" {
+			r.ActionDesc = "退出观察，暂不换入"
+			r.Rationale = appendPickRiskNote(r.Rationale, "最终风险过滤不允许轮动买入，退出与换入必须分开判断")
+		}
+	}
+}
+
+// applyScoreAndRegime 统一模型与降级分支的评分口径；保留既有宏观规则与阈值。
+func applyScoreAndRegime(dec *types.FinalDecision, st *types.AgentState) {
+	dec.OverallScore = weightedScore(st)
+	dec.ScoreBreakdown = scoreBreakdown(st)
+	dec.BaseRecommendation = RuleRecommend(dec.OverallScore)
+	dec.Recommendation = CapRecommendation(dec.BaseRecommendation, st.Regime)
+	dec.DecisionNotes = nil
+	if st.Regime != nil {
+		switch st.Regime.Trend {
+		case "risk_off":
+			dec.DecisionNotes = append(dec.DecisionNotes, fmt.Sprintf("宏观风险否决：基准 %s 低于120日均线，近60日最大回撤 %.2f%% 达到8%%阈值；最终 avoid，策略仓位上限0%%，暂停新开仓与轮动买入", st.Regime.Benchmark, st.Regime.DrawDown60*100))
+		case "bear":
+			dec.DecisionNotes = append(dec.DecisionNotes, fmt.Sprintf("弱势环境：买入建议最高降为 hold，策略仓位上限 %.0f%%", st.Regime.PositionCap*100))
+		}
 	}
 }
 
@@ -933,7 +970,7 @@ func summarizeTop5(top []types.ScoredETF) []map[string]interface{} {
 //     · 对应 TechList trend != down，
 //     满足则作为 Pick #2；否则只返回 1 支。
 func fallbackPicks(st *types.AgentState, dec *types.FinalDecision) []types.FinalPick {
-	if st.Screener == nil || len(st.Screener.Top5) == 0 {
+	if st.Screener == nil || len(st.Screener.Top5) == 0 || dec.Recommendation == "avoid" {
 		return nil
 	}
 	best := st.Screener.Best
@@ -983,7 +1020,7 @@ func fallbackPicks(st *types.AgentState, dec *types.FinalDecision) []types.Final
 			continue
 		}
 		picks = append(picks, buildAltPick(e, n, t))
-		return picks
+		return sanitizePicks(picks, st, dec)
 	}
 	// 板块全部相同时，退而求其次：仅排除 negative + down 即可。
 	for _, e := range st.Screener.Top5 {
@@ -996,9 +1033,9 @@ func fallbackPicks(st *types.AgentState, dec *types.FinalDecision) []types.Final
 			continue
 		}
 		picks = append(picks, buildAltPick(e, n, t))
-		return picks
+		return sanitizePicks(picks, st, dec)
 	}
-	return picks
+	return sanitizePicks(picks, st, dec)
 }
 
 func buildAltPick(e types.ScoredETF, n types.NewsAnalysis, t types.TechnicalAnalysis) types.FinalPick {
@@ -1053,6 +1090,9 @@ func buildAltPick(e types.ScoredETF, n types.NewsAnalysis, t types.TechnicalAnal
 //   - 截断到最多 2 支。
 //   - 缺字段时按 ScoredETF 默认值补齐。
 func sanitizePicks(picks []types.FinalPick, st *types.AgentState, dec *types.FinalDecision) []types.FinalPick {
+	if dec.Recommendation == "avoid" {
+		return nil
+	}
 	if st.Screener == nil {
 		return picks
 	}
@@ -1103,6 +1143,15 @@ func sanitizePicks(picks []types.FinalPick, st *types.AgentState, dec *types.Fin
 			if _, note := CapByRiskReward(p.Recommendation, p.EntryPrice, p.StopLoss, p.TakeProfit); note != "" {
 				p.Rationale = appendPickRiskNote(p.Rationale, "盈亏比提示："+note)
 			}
+		}
+		// 备选也必须服从同一宏观否决和最终观察状态。
+		if capped := CapRecommendation(p.Recommendation, st.Regime); capped != p.Recommendation {
+			p.Recommendation = capped
+			p.Rationale = appendPickRiskNote(p.Rationale, "服从宏观风险限制")
+		}
+		if dec.Recommendation == "hold" && (p.Recommendation == "buy" || p.Recommendation == "strong_buy") {
+			p.Recommendation = "hold"
+			p.Rationale = appendPickRiskNote(p.Rationale, "最终建议仅观察，不新增仓位")
 		}
 		if p.Conviction == 0 {
 			p.Conviction = e.Score
@@ -1231,12 +1280,12 @@ func holdCandidatesPayload(st *types.AgentState) []map[string]interface{} {
 			"etf_name":    name,
 			"sector":      sector,
 			"rank":        0,
-			"score":       0,
-			"score_gap":   bestScore,
+			"score":       nil,
+			"score_gap":   nil,
 			"action":      "",
 			"action_desc": "池外（未进动量候选）",
 			"is_top5":     false,
-			"note":        "该持仓未进今日动量 Top5，仅作持仓评审（建议结合盘中盯盘止盈信号）",
+			"note":        "当前候选未覆盖该持仓，缺少独立量化与技术数据；缺失不等于0分或趋势失效，只能observe，不能据此减仓或切换",
 		}
 		if n, ok := newsByCode[code]; ok {
 			offRow["news_sentiment"] = n.Sentiment
@@ -1258,8 +1307,7 @@ func holdCandidatesPayload(st *types.AgentState) []map[string]interface{} {
 
 // buildHoldReviewsFallback 规则版持仓评审：holds 驱动（不再只遍历 Top5）。
 //   - 命中 Top5 / 豁免位的持仓：用候选 ScoredETF + news/tech 信号走 decideHoldAction → keep/trim/rotate；
-//   - 池外持仓（未进今日动量 Top5）：补一条 trim/observe，提示"动量转弱或防御板块滞涨，
-//     结合盘中盯盘止盈信号决定去留"——不算精确分（精确信号由盘中 intraday 给）。
+//   - 未覆盖的持仓：仅 observe，不能把缺失数据解释成0分或减仓信号。
 //   - rotate / trim / keep 的客观映射规则见 decideHoldAction。
 func buildHoldReviewsFallback(st *types.AgentState) []types.HoldReview {
 	if st == nil || st.Screener == nil {
@@ -1320,21 +1368,7 @@ func buildHoldReviewsFallback(st *types.AgentState) []types.HoldReview {
 			})
 			continue
 		}
-		// 池外持仓：未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨）→ trim 观察
-		name, sector := lookupETFName(code)
-		out = append(out, types.HoldReview{
-			ETFCode:    code,
-			ETFName:    name,
-			Sector:     sector,
-			InTop:      false,
-			Rank:       0,
-			Score:      0,
-			Action:     "trim",
-			ActionDesc: holdActionDesc("trim"),
-			NewsBias:   classifyNewsBias(newsByCode[code]),
-			TechTrend:  classifyTechTrend(techByCode[code]),
-			Rationale:  "未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨），建议结合盘中盯盘止盈信号决定去留。",
-		})
+		out = append(out, unavailableHoldReview(code))
 	}
 	if len(out) == 0 {
 		return nil
@@ -1392,31 +1426,12 @@ func sanitizeHoldReviews(reviews []types.HoldReview, st *types.AgentState) []typ
 		}
 		e, hit := candidateByCode[code]
 		seen[code] = struct{}{}
-		if hit {
-			if r.ETFName == "" {
-				r.ETFName = e.ETF.Name
-			}
-			if r.Sector == "" {
-				r.Sector = e.ETF.Sector
-			}
-			if r.Score == 0 {
-				r.Score = e.Score
-			}
-			if r.Rank == 0 {
-				r.Rank = rankByCode[code]
-			}
-		} else {
-			// 池外持仓（不在 Top5/豁免位）：保留 LLM 评审，仅补 name/sector，不回填分数/名次
-			if r.ETFName == "" || r.Sector == "" {
-				name, sector := lookupETFName(code)
-				if r.ETFName == "" {
-					r.ETFName = name
-				}
-				if r.Sector == "" {
-					r.Sector = sector
-				}
-			}
+		if !hit {
+			out = append(out, unavailableHoldReview(code))
+			continue
 		}
+		// 名次和量化分直接取候选数据，避免模型伪造客观字段。
+		r.ETFName, r.Sector, r.Score, r.Rank = e.ETF.Name, e.ETF.Sector, e.Score, rankByCode[code]
 		r.InTop = r.Rank > 0 && r.Rank <= 5
 		newsBias := classifyNewsBias(newsByCode[code])
 		techTrend := classifyTechTrend(techByCode[code])
@@ -1427,25 +1442,16 @@ func sanitizeHoldReviews(reviews []types.HoldReview, st *types.AgentState) []typ
 			r.TechTrend = techTrend
 		}
 		if !validHoldAction(r.Action) {
-			if hit {
-				r.Action, r.ActionDesc = decideHoldAction(e, newsBias, techTrend, bestScore-e.Score, r.Rank)
-			} else {
-				// 池外持仓默认 trim 观察（精确止盈信号由盘中 intraday 给）
-				r.Action, r.ActionDesc = "trim", holdActionDesc("trim")
-			}
+			r.Action, r.ActionDesc = decideHoldAction(e, newsBias, techTrend, bestScore-e.Score, r.Rank)
 		}
 		if r.ActionDesc == "" {
 			r.ActionDesc = holdActionDesc(r.Action)
 		}
 		if strings.TrimSpace(r.Rationale) == "" {
-			if hit {
-				r.Rationale = fmt.Sprintf(
-					"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
-					e.Score, bestScore-e.Score, e.ActionDesc, r.NewsBias, r.TechTrend, r.ActionDesc,
-				)
-			} else {
-				r.Rationale = "未进今日动量 Top5（动量/趋势转弱或属防御板块滞涨），建议结合盘中盯盘止盈信号决定去留。"
-			}
+			r.Rationale = fmt.Sprintf(
+				"量化分%.2f（落后 best %.2f）+ 动量动作=%s + 消息面=%s + 技术趋势=%s → %s。",
+				e.Score, bestScore-e.Score, e.ActionDesc, r.NewsBias, r.TechTrend, r.ActionDesc,
+			)
 		}
 		out = append(out, r)
 	}
@@ -1482,8 +1488,20 @@ func decideHoldAction(e types.ScoredETF, newsBias, techTrend string, gap float64
 	}
 }
 
+func unavailableHoldReview(code string) types.HoldReview {
+	name, sector := lookupETFName(code)
+	return types.HoldReview{
+		ETFCode: code, ETFName: name, Sector: sector,
+		Action: "observe", ActionDesc: holdActionDesc("observe"),
+		NewsBias: "unknown", TechTrend: "unknown",
+		Rationale: "候选列表未覆盖该持仓，缺少独立量化与技术数据；不代表0分或趋势失效，暂不据此减仓或切换，需补齐数据后复核。",
+	}
+}
+
 func holdActionDesc(action string) string {
 	switch action {
+	case "observe":
+		return "数据不足，暂不判定"
 	case "keep":
 		return "继续持有"
 	case "trim":
@@ -1495,7 +1513,7 @@ func holdActionDesc(action string) string {
 }
 
 func validHoldAction(a string) bool {
-	return a == "keep" || a == "trim" || a == "rotate"
+	return a == "keep" || a == "trim" || a == "rotate" || a == "observe"
 }
 
 func validNewsBias(s string) bool {
