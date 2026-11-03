@@ -94,6 +94,10 @@ func (f *IndexFetcher) FetchIndex(symbols []string) map[string]IndexQuote {
 			out[key] = q
 			continue
 		}
+		if q := f.fetchFromEastMoneyIndex(key); q.Last > 0 {
+			out[key] = q
+			continue
+		}
 		if q := f.fetchFromStooq(key); q.Last > 0 {
 			out[key] = q
 			continue
@@ -160,6 +164,78 @@ func (f *IndexFetcher) fetchFromTencent(symbol string) IndexQuote {
 
 // fetchFromStooq 通过 Stooq CSV 接口拉取最近一根日线，覆盖 N225/KOSPI 等亚太指数。
 // CSV: Date,Open,High,Low,Close,Volume
+// fetchFromEastMoneyIndex 通过东方财富 push2 拉取海外指数行情。
+//
+// 2026-11-03 起作为 Stooq 失效（/q/l/ 返回 404 页面）后的主力来源：
+// Stooq 已不可用、Yahoo 频繁 429，腾讯仅覆盖 HSI/SH，导致报告长期"数据缺失"。
+// 东财返回字段（fltt=2 时已是可直接使用的浮点数）：
+//
+//	f43 最新价 / f58 名称 / f60 昨收 / f169 涨跌额 / f170 涨跌幅(%) / f86 行情时间戳(unix秒)
+//
+// 注意：f86 是绝对时间戳，日经等休市日会停在前一交易日，调用方必须自行判断时效。
+var eastMoneyIndexMap = map[string]string{
+	"SPX":   "100.SPX",
+	"NDX":   "100.NDX",
+	"DJI":   "100.DJIA",
+	"N225":  "100.N225",
+	"KOSPI": "100.KS11",
+	"HSI":   "100.HSI",
+}
+
+func (f *IndexFetcher) fetchFromEastMoneyIndex(symbol string) IndexQuote {
+	secid, ok := eastMoneyIndexMap[symbol]
+	if !ok {
+		return IndexQuote{Symbol: symbol}
+	}
+	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/stock/get?secid=%s&fltt=2&invt=2&fields=f43,f58,f60,f169,f170,f86", url.QueryEscape(secid))
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	req.Header.Set("Referer", "https://quote.eastmoney.com/")
+	resp, err := f.HTTP.Do(req)
+	if err != nil {
+		return IndexQuote{Symbol: symbol}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var raw struct {
+		Data struct {
+			Last      float64 `json:"f43"`
+			Name      string  `json:"f58"`
+			PrevClose float64 `json:"f60"`
+			Change    float64 `json:"f169"`
+			ChangePct float64 `json:"f170"`
+			Time      int64   `json:"f86"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return IndexQuote{Symbol: symbol}
+	}
+	d := raw.Data
+	if d.Last <= 0 {
+		return IndexQuote{Symbol: symbol}
+	}
+	q := IndexQuote{
+		Symbol: symbol, Name: d.Name,
+		Last: d.Last, PrevClose: d.PrevClose,
+		Change: d.Change, ChangePct: d.ChangePct / 100, // 接口是百分数，内部统一用小数
+		Source: "eastmoney",
+	}
+	if d.Time > 0 {
+		q.Time = time.Unix(d.Time, 0)
+	}
+	// 亚太指数按日期维度校验（收盘快照时间可能晚于早盘 anchor）；美股按 tick 维度。
+	isAsia := symbol == "N225" || symbol == "KOSPI" || symbol == "HSI"
+	if isAsia {
+		if f.isFutureDay(q.Time) {
+			return IndexQuote{Symbol: symbol}
+		}
+	} else if f.isFutureTick(q.Time) {
+		return IndexQuote{Symbol: symbol}
+	}
+	return q
+}
+
 func (f *IndexFetcher) fetchFromStooq(symbol string) IndexQuote {
 	stooqMap := map[string]string{
 		"SPX":   "^spx",
