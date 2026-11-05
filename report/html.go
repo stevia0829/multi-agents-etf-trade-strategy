@@ -127,6 +127,19 @@ func BuildHTML(state *types.AgentState, now time.Time) (string, error) {
 			}
 			return "neutral"
 		},
+		"quoteStatus": func(s string) string {
+			switch s {
+			case "intraday":
+				return "盘中"
+			case "closed":
+				return "收盘"
+			case "previous_session":
+				return "最近交易日"
+			case "unavailable":
+				return "缺失"
+			}
+			return s
+		},
 		"trend": func(s string) string {
 			switch s {
 			case "risk_off":
@@ -194,6 +207,6 @@ const reportHTML = `<!doctype html>
 <div class="section-title"><h2>当前持仓复核</h2><span>缺数据不等于0分，也不等于趋势失效</span></div><section class="grid"><div class="card"><h3>逐项评审</h3>{{range .Final.HoldReviews}}<article class="review"><div class="review-head"><strong>{{.ETFName}} <span class="small">{{.ETFCode}}</span></strong><span class="pill">{{.ActionDesc}}</span></div><div class="small">{{rank .}} · 量化分 {{reviewScore .}} · 技术趋势 {{trend .TechTrend}}</div><p>{{.Rationale}}</p></article>{{else}}<p class="small">本次未提供可评审的持仓数据。</p>{{end}}</div><div class="card"><h3>与策略候选的对照</h3>{{range .Holds}}<article class="review"><strong>{{.CurrentHold}}</strong><p>{{.Suggestion}}</p></article>{{else}}<p class="small">未提供当前持仓对照。持仓由本次输入决定，请核对代码及数量是否仍有效。</p>{{end}}</div></section>
 <div class="section-title"><h2>候选观察池</h2><span>候选排名不等同于允许买入</span></div><section class="card"><div class="table-wrap"><table><thead><tr><th>标的 / 代码</th><th>板块</th><th>参考价格</th><th>量化分</th><th>动量状态</th><th>溢价</th></tr></thead><tbody>{{with .State.Screener}}{{range .Top5}}<tr><td class="fund">{{.ETF.Name}}<span class="code">{{.ETF.Code}}{{if .IsCurrentHold}} · 当前持仓{{end}}</span></td><td>{{.ETF.Sector}}</td><td class="number">{{price .ETF.Price}}</td><td>{{num .Score}}</td><td>{{.ActionDesc}}</td><td>{{if gt .ETF.IOPV 0.0}}{{signedPct .ETF.PremiumPct}}{{else}}—{{end}}</td></tr>{{end}}{{end}}</tbody></table></div>
 <details><summary>目标标的参考价位{{if eq .Final.Recommendation "avoid"}} · 当前不执行买入{{end}}</summary><p class="small">{{.Final.TargetETF.ETF.Name}} {{.Final.TargetETF.ETF.Code}}。最终建议为回避或观察时，以下数值不构成有效买入计划。</p><div class="prices"><div><span class="small">入场参考</span><strong>{{price .Final.EntryPrice}}</strong></div><div><span class="small">止损参考</span><strong>{{price .Final.StopLoss}}</strong></div><div><span class="small">止盈参考</span><strong>{{price .Final.TakeProfit}}</strong></div></div></details></section>
-<div class="section-title"><h2>分析依据</h2><span>执行以风险过滤后的结论为准</span></div><section class="grid"><div class="card full"><h3>综合研判</h3><div class="reading">{{.Final.Reasoning}}</div></div>{{with .State.Tech}}<div class="card"><h3>技术面 <span class="tag">{{trend .Trend}}</span></h3><div class="reading">{{.Summary}}</div></div>{{end}}{{with .State.News}}<div class="card"><h3>消息面</h3>{{range .Highlight}}<p class="small">{{.}}</p>{{end}}<div class="reading">{{.Summary}}</div></div>{{end}}{{with .State.Global}}<div class="card"><h3>海外联动</h3><div class="reading">{{.Summary}}</div></div>{{end}}{{with .State.MoneyFlow}}<div class="card"><h3>资金面</h3><div class="reading">{{.Summary}}</div><p class="small">资金流为量价代理估算，不是真实北向或申赎数据。</p></div>{{end}}</section>
+<div class="section-title"><h2>分析依据</h2><span>执行以风险过滤后的结论为准</span></div><section class="grid"><div class="card full"><h3>综合研判</h3><div class="reading">{{.Final.Reasoning}}</div></div>{{with .State.Tech}}<div class="card"><h3>技术面 <span class="tag">{{trend .Trend}}</span></h3><div class="reading">{{.Summary}}</div></div>{{end}}{{with .State.News}}<div class="card"><h3>消息面</h3>{{range .Highlight}}<p class="small">{{.}}</p>{{end}}<div class="reading">{{.Summary}}</div></div>{{end}}{{with .State.Global}}<div class="card"><h3>海外联动</h3><div class="reading">{{.Summary}}</div>{{if .Snapshots}}<div class="table-wrap"><table><thead><tr><th>指数</th><th>最新</th><th>涨跌幅</th><th>交易日 / 来源</th><th>状态 / 报价时间</th></tr></thead><tbody>{{range .Snapshots}}<tr><td>{{.Index}}</td><td>{{price .Last}}</td><td>{{if eq .Status "unavailable"}}—{{else}}{{num .ChangePc}}%{{end}}</td><td>{{.TradingDate}}<span class="code">{{.Source}}</span></td><td>{{quoteStatus .Status}}<span class="code">{{.AsOf}}</span></td></tr>{{end}}</tbody></table></div>{{end}}</div>{{end}}{{with .State.MoneyFlow}}<div class="card"><h3>资金面</h3><div class="reading">{{.Summary}}</div><p class="small">资金流为量价代理估算，不是真实北向或申赎数据。</p></div>{{end}}</section>
 <footer class="footer">本报告由规则与多维分析生成，仅供研究参考。行情与净值可能存在时差；执行前核对数据日期、费用及真实持仓。<br>完整 Markdown 和 JSON 与本页同目录保存。</footer>
 </main></body></html>`

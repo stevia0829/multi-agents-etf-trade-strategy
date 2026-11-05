@@ -220,12 +220,18 @@ func writeGlobal(b *strings.Builder, g *types.GlobalMarketAnalysis) {
 	}
 	b.WriteString("## 四、跨境市场联动 (GlobalMarketAgent)\n\n")
 	b.WriteString(fmt.Sprintf("- 整体情绪: **%s** · 评分: **%.2f**\n\n", g.Sentiment, g.Score))
-	b.WriteString("| 市场 | 指数 | 涨跌 | 涨跌幅 | 备注 |\n|---|---|---|---|---|\n")
-	rows := []types.MarketSnapshot{g.USPrev, g.JPToday, g.KRToday}
-	labels := []string{"美股(前夜)", "日本(今日)", "韩国(今日)"}
-	for i, r := range rows {
-		b.WriteString(fmt.Sprintf("| %s | %s | %.2f | %.2f%% | %s |\n",
-			labels[i], r.Index, r.Change, r.ChangePc, r.Note))
+	b.WriteString("| 指数 | 涨跌 | 涨跌幅 | 交易日 | 报价时间 | 来源 / 状态 | 备注 |\n|---|---|---|---|---|---|---|\n")
+	rows := g.Snapshots
+	if len(rows) == 0 {
+		rows = []types.MarketSnapshot{g.USPrev, g.JPToday, g.KRToday}
+	}
+	for _, r := range rows {
+		change, pct := fmt.Sprintf("%.2f", r.Change), fmt.Sprintf("%.2f%%", r.ChangePc)
+		if r.Status == "unavailable" {
+			change, pct = "—", "—"
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s / %s | %s |\n",
+			r.Index, change, pct, r.TradingDate, r.AsOf, r.Source, r.Status, r.Note))
 	}
 	if g.Summary != "" {
 		b.WriteString("\n**传导研判**\n\n> " + indentQuote(g.Summary) + "\n\n")
