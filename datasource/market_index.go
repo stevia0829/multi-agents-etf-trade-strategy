@@ -39,7 +39,10 @@ var indexNames = map[string]string{"SPX": "标普500", "NDX": "纳斯达克100",
 // 映射经其公开证券搜索与行情接口交叉核对，不能用相近指数代替。
 var eastmoneyIndexMap = map[string]string{"SPX": "100.SPX", "NDX": "100.NDX100", "DJI": "100.DJIA", "N225": "100.N225", "KOSPI": "100.KS11", "HSI": "100.HSI", "SH": "1.000001"}
 var yahooSymbolMap = map[string]string{"SPX": "^GSPC", "NDX": "^NDX", "DJI": "^DJI", "N225": "^N225", "KOSPI": "^KS11", "HSI": "^HSI", "SH": "000001.SS"}
-var indexSymbolMap = map[string]string{"HSI": "hkHSI", "SH": "sh000001"}
+
+// 腾讯的 usNDX 是纳斯达克100；不能用 usIXIC 的综合指数代替。
+var indexSymbolMap = map[string]string{"SPX": "usINX", "NDX": "usNDX", "DJI": "usDJI", "HSI": "hkHSI", "SH": "sh000001"}
+var tencentIndexCode = map[string]string{"SPX": ".INX", "NDX": ".NDX", "DJI": ".DJI", "HSI": "HSI", "SH": "000001"}
 
 func indexLocation(symbol string) *time.Location {
 	name := "Asia/Shanghai"
@@ -218,6 +221,54 @@ func (f *IndexFetcher) FetchIndex(symbols []string) map[string]IndexQuote {
 	return out
 }
 
+// FetchIndexFromSource 独立诊断指定来源，不以备用源的成功掩盖该来源故障。
+// 与正常抓取共用解析和时间校验，不会修改生产数据源顺序。
+func (f *IndexFetcher) FetchIndexFromSource(symbols []string, source string) map[string]IndexQuote {
+	if source == "auto" || source == "" {
+		return f.FetchIndex(symbols)
+	}
+	if source == "eastmoney" {
+		quotes, err := f.fetchFromEastMoney(symbols)
+		for _, key := range symbols {
+			if _, ok := quotes[key]; !ok {
+				reason := "missing or invalid quote"
+				if err != nil {
+					reason = err.Error()
+				}
+				quotes[key] = IndexQuote{Symbol: key, Name: indexNames[key], Source: "unavailable", Error: source + ": " + reason}
+			}
+		}
+		return quotes
+	}
+	out := make(map[string]IndexQuote)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, key := range symbols {
+		wg.Add(1)
+		go func(key string) {
+			defer wg.Done()
+			var q IndexQuote
+			var err error
+			switch source {
+			case "tencent":
+				q, err = f.fetchFromTencent(key)
+			case "yahoo":
+				q, err = f.fetchFromYahoo(key, "query1.finance.yahoo.com")
+			default:
+				err = fmt.Errorf("unsupported source %q", source)
+			}
+			if err != nil {
+				q = IndexQuote{Symbol: key, Name: indexNames[key], Source: "unavailable", Error: source + ": " + err.Error()}
+			}
+			mu.Lock()
+			out[key] = q
+			mu.Unlock()
+		}(key)
+	}
+	wg.Wait()
+	return out
+}
+
 func (f *IndexFetcher) fetchFromEastMoney(symbols []string) (map[string]IndexQuote, error) {
 	ids := []string{}
 	byCode := map[string]string{}
@@ -297,6 +348,9 @@ func (f *IndexFetcher) fetchFromTencent(symbol string) (IndexQuote, error) {
 	parts := strings.Split(text[start+1:end], "~")
 	if len(parts) <= 30 {
 		return IndexQuote{}, fmt.Errorf("missing timestamp field")
+	}
+	if parts[2] != tencentIndexCode[symbol] {
+		return IndexQuote{}, fmt.Errorf("symbol mismatch: got %s want %s", parts[2], tencentIndexCode[symbol])
 	}
 	var stamp time.Time
 	for _, layout := range []string{"20060102150405", "2006/01/02 15:04:05", "2006-01-02 15:04:05"} {

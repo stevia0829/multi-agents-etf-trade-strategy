@@ -72,6 +72,9 @@ func TestYahooFallbackUsesNasdaq100AndPriorBarNotWindowBase(t *testing.T) {
 		if req.URL.Host == "push2.eastmoney.com" {
 			return indexResponse(503, "unavailable"), nil
 		}
+		if req.URL.Host == "qt.gtimg.cn" {
+			return indexResponse(503, "unavailable"), nil
+		}
 		if !strings.HasSuffix(req.URL.Path, "/^NDX") || req.URL.Query().Get("range") != "5d" {
 			t.Errorf("wrong yahoo URL %s", req.URL)
 		}
@@ -81,7 +84,7 @@ func TestYahooFallbackUsesNasdaq100AndPriorBarNotWindowBase(t *testing.T) {
 	if got.Source != "yahoo" || got.Last != 110 || got.PrevClose != 100 || math.Abs(got.ChangePct-.1) > 1e-9 {
 		t.Fatalf("wrong fallback %+v", got)
 	}
-	if len(got.Failures) != 1 || !strings.Contains(got.Failures[0], "HTTP 503") {
+	if len(got.Failures) != 2 || !strings.Contains(got.Failures[0], "HTTP 503") || !strings.Contains(got.Failures[1], "tencent") {
 		t.Fatal("failure diagnostics lost")
 	}
 }
@@ -156,6 +159,7 @@ func TestTencentUsesActualTimestampInBothMarketFormats(t *testing.T) {
 	for _, stamp := range []string{"20261102144900", "2026/11/02 14:49:00"} {
 		f := NewIndexFetcher().WithAsOf(indexTime("2026-11-02T14:50:00+08:00"))
 		parts := make([]string, 31)
+		parts[2] = "HSI"
 		parts[3] = "110"
 		parts[4] = "100"
 		parts[30] = stamp
@@ -169,5 +173,80 @@ func TestTencentUsesActualTimestampInBothMarketFormats(t *testing.T) {
 		if !q.Time.Equal(indexTime("2026-11-02T14:49:00+08:00")) || q.Status != "intraday" {
 			t.Fatalf("timestamp replaced or misread %+v", q)
 		}
+	}
+}
+
+func tencentIndexPayload(code, last, prev, stamp string) string {
+	parts := make([]string, 31)
+	parts[2], parts[3], parts[4], parts[30] = code, last, prev, stamp
+	return `v_quote="` + strings.Join(parts, "~") + `";`
+}
+
+func TestTencentUSFallbackUsesCorrectIndexAndExchangeTimezone(t *testing.T) {
+	for _, test := range []struct{ symbol, code string }{{"SPX", ".INX"}, {"NDX", ".NDX"}, {"DJI", ".DJI"}} {
+		t.Run(test.symbol, func(t *testing.T) {
+			f := NewIndexFetcher().WithAsOf(indexTime("2026-11-05T08:50:00+08:00"))
+			f.HTTP = &http.Client{Transport: indexTestTransport(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Host {
+				case "push2.eastmoney.com":
+					return indexResponse(503, "unavailable"), nil
+				case "qt.gtimg.cn":
+					if r.URL.Path != "/q="+indexSymbolMap[test.symbol] {
+						t.Errorf("wrong symbol request: %s", r.URL)
+					}
+					return indexResponse(200, tencentIndexPayload(test.code, "110", "100", "2026-11-04 16:51:11")), nil
+				default:
+					t.Fatalf("working Tencent fallback should not call %s", r.URL.Host)
+					return nil, nil
+				}
+			})}
+			q := f.FetchIndex([]string{test.symbol})[test.symbol]
+			if q.Source != "tencent" || q.Last != 110 || q.PrevClose != 100 || q.TradingDate != "2026-11-04" || q.Status != "closed" || math.Abs(q.ChangePct-.1) > 1e-9 {
+				t.Fatalf("invalid US fallback: %+v", q)
+			}
+			if !q.Time.Equal(indexTime("2026-11-04T16:51:11-05:00")) || len(q.Failures) != 1 {
+				t.Fatalf("timezone or failure diagnostics lost: %+v", q)
+			}
+		})
+	}
+}
+
+func TestTencentRejectsWrongIndexAndUnavailableTimes(t *testing.T) {
+	for _, test := range []struct{ name, code, last, prev, stamp string }{
+		{"nasdaq_composite_is_not_nasdaq100", ".IXIC", "110", "100", "2026-11-04 16:51:11"},
+		{"missing_previous_close", ".NDX", "110", "", "2026-11-04 16:51:11"},
+		{"future", ".NDX", "110", "100", "2026-11-05 16:51:11"},
+		{"US_intraday", ".NDX", "110", "100", "2026-11-04 15:00:00"},
+		{"stale", ".NDX", "110", "100", "2026-10-20 16:51:11"},
+		{"no_timestamp", ".NDX", "110", "100", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := NewIndexFetcher().WithAsOf(indexTime("2026-11-05T08:50:00+08:00"))
+			f.HTTP = &http.Client{Transport: indexTestTransport(func(*http.Request) (*http.Response, error) {
+				return indexResponse(200, tencentIndexPayload(test.code, test.last, test.prev, test.stamp)), nil
+			})}
+			if _, err := f.fetchFromTencent("NDX"); err == nil {
+				t.Fatal("invalid index quote accepted")
+			}
+		})
+	}
+}
+
+func TestSourceDiagnosticDoesNotHideOutageBehindFallback(t *testing.T) {
+	for _, source := range []string{"eastmoney", "tencent", "yahoo"} {
+		f := NewIndexFetcher()
+		calls := 0
+		f.HTTP = &http.Client{Transport: indexTestTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return indexResponse(429, "rate limited"), nil
+		})}
+		q := f.FetchIndexFromSource([]string{"NDX"}, source)["NDX"]
+		if calls != 1 || q.Last != 0 || !strings.Contains(q.Error, source) || !strings.Contains(q.Error, "HTTP 429") {
+			t.Fatalf("source=%s calls=%d quote=%+v", source, calls, q)
+		}
+	}
+	f := NewIndexFetcher()
+	if q := f.FetchIndexFromSource([]string{"KOSPI"}, "tencent")["KOSPI"]; q.Last != 0 || !strings.Contains(q.Error, "unsupported symbol") {
+		t.Fatalf("unsupported source coverage hidden: %+v", q)
 	}
 }

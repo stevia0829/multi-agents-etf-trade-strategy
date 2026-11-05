@@ -16,9 +16,14 @@ import (
 func main() {
 	anchor := flag.String("as-of", "", "查询锚点，RFC3339，例如2026-11-02T08:50:00+08:00")
 	symbols := flag.String("symbols", "SPX,NDX,DJI,N225,KOSPI,HSI", "内部指数代码，逗号分隔")
+	source := flag.String("source", "auto", "数据源：auto / eastmoney / tencent / yahoo；指定来源时不使用备用源")
 	jsonOutput := flag.Bool("json", false, "输出JSON")
 	timeout := flag.Duration("timeout", 8*time.Second, "单次HTTP超时")
 	flag.Parse()
+	if *source != "auto" && *source != "eastmoney" && *source != "tencent" && *source != "yahoo" {
+		fmt.Fprintln(os.Stderr, "invalid --source, expect auto / eastmoney / tencent / yahoo")
+		os.Exit(2)
+	}
 	f := datasource.NewIndexFetcher()
 	f.HTTP = &http.Client{Timeout: *timeout}
 	if *anchor != "" {
@@ -29,9 +34,21 @@ func main() {
 		}
 		f.WithAsOf(t)
 	}
-	keys := strings.Split(*symbols, ",")
+	keys := []string{}
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(*symbols, ",") {
+		key := strings.ToUpper(strings.TrimSpace(raw))
+		if key != "" && !seen[key] {
+			keys = append(keys, key)
+			seen[key] = true
+		}
+	}
+	if len(keys) == 0 {
+		fmt.Fprintln(os.Stderr, "--symbols must contain at least one index")
+		os.Exit(2)
+	}
 	start := time.Now()
-	quotes := f.FetchIndex(keys)
+	quotes := f.FetchIndexFromSource(keys, *source)
 	failed := false
 	if *jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
@@ -56,7 +73,13 @@ func main() {
 			failed = true
 		}
 	}
-	fmt.Fprintln(os.Stderr, "elapsed:", time.Since(start).Round(time.Millisecond))
+	available := 0
+	for _, q := range quotes {
+		if q.Last > 0 {
+			available++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "source: %s; available: %d/%d; elapsed: %s\n", *source, available, len(keys), time.Since(start).Round(time.Millisecond))
 	if failed {
 		os.Exit(1)
 	}

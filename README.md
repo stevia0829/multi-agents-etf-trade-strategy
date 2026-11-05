@@ -115,7 +115,7 @@ go run ./cmd/global-index-check   # 只读检查六个海外指数、时间戳�
 
 这些命令与每日 advice 独立运行，不会修改线上参数。裸动量回测不包含模型新闻分析和人工执行判断，不能当成完整线上 advice 的历史复现。
 
-海外指数主源为东方财富公开行情接口，一次查询标普500、纳斯达克100、道指、日经225、KOSPI及恒生；失败项再尝试腾讯（恒生/上证）和Yahoo。直接使用Go标准库，不需要安装AKShare或配置付费Key。接口为公开行情服务，并非可用性保证；来源、真实报价时间、交易日和降级错误会保留。
+海外指数主源为东方财富公开行情接口，一次查询标普500、纳斯达克100、道指、日经225、KOSPI及恒生；失败项再尝试腾讯（美股三大指数、恒生/上证）和Yahoo。直接使用Go标准库，不需要安装AKShare或配置付费Key。接口为公开行情服务，并非可用性保证；来源、真实报价时间、交易日和降级错误会保留。
 
 代码映射特别注意：东方财富`100.NDX100` / Yahoo`^NDX`才是纳斯达克100，不能用`100.NDX` / `^IXIC`的综合指数代替；韩国KOSPI为`100.KS11` / `^KS11`。涨跌幅按前一交易日收盘计算，不使用开盘价或多日窗口起点。美股仅使用已结束的交易时段；历史查询不允许用当日下午收盘回填早盘，亚太休市时明确标为最近交易日数据。
 
@@ -123,8 +123,14 @@ go run ./cmd/global-index-check   # 只读检查六个海外指数、时间戳�
 
 ```bash
 go run ./cmd/global-index-check --json
+go run ./cmd/global-index-check --source eastmoney --json
+go run ./cmd/global-index-check --source tencent --symbols SPX,NDX,DJI --json
 go run ./cmd/global-index-check --as-of '2026-11-02T08:50:00+08:00'
 ```
+
+`--source`固定数据源而不自动降级，适合定位服务器网络限制。腾讯不覆盖这里的日经/KOSPI，不能通过换成其他指数来凑齐数据；这两项仍由东方财富/Yahoo负责。腾讯`usINX/usNDX/usDJI`的返回代码必须分别为`.INX/.NDX/.DJI`，美股时间按纽约时区解析（包括夏令时）。命令输出可用数量，缺失任一请求指数时返回非零退出码。
+
+如果本地检查正常但服务器日报仍长期缺失，先在**定时任务实际运行目录**执行以上命令，并核对`git log -1 --oneline`及启动命令是否调用旧二进制。新版报告JSON应有`global.snapshots`六项行情，以及每项的`source/trading_date/as_of/status`；仅有`us_prev/jp_today/kr_today`、没有这些元数据的报告，不是这版生成链路。免费接口可用不等于部署完成，必须以服务器新生成的报告验证。
 
 `--as-of`用于校验来源数据是否在查询时刻已可用，不是历史分钟行情接口。美股提前收市日按标准16:00保守确认；尚未引入完整交易所休市日历。主源来自[AKShare全球指数实现](https://github.com/akfamily/akshare/blob/master/akshare/index/index_global_em.py)所用公开接口，纳指100映射另以东方财富证券搜索接口核实。
 
