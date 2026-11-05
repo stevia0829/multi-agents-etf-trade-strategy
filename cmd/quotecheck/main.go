@@ -15,7 +15,7 @@ func main() {
 
 	// ---------- 1. ETF 场内实时报价（腾讯 qt.gtimg.cn，含 IOPV） ----------
 	ds := datasource.NewEastMoneyDataSource()
-	codes := []string{"159687", "513100", "159941", "518850", "159529"}
+	codes := []string{"159687", "513100", "159941", "518850", "159529", "159928"}
 	fmt.Println("\n== ETF 实时报价 (源: Tencent qt.gtimg.cn) ==")
 	type row struct {
 		Code, Name string
