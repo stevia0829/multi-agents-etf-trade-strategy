@@ -1,10 +1,12 @@
 import json
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from etf_intraday_15m import CST, active_minutes, completed_slot, notify_once, scan, tencent_rows
+from etf_intraday_15m import (
+    CST, active_minutes, completed_slot, load_halts, notify_once, safe_eval, scan, tencent_rows,
+)
 
 NOW = datetime.fromisoformat("2026-11-16T10:01:00+08:00")
 DAY = NOW.date()
@@ -97,6 +99,88 @@ class Intraday(unittest.TestCase):
             self.assertTrue(result["signals"]["510300"]["held"])
             self.assertEqual(len(notify_once(result, state)["alerts"]), 2)
             self.assertEqual(notify_once(result, state)["alerts"], [])
+
+    def test_announced_opening_halts_and_resume(self):
+        dates = {DAY - timedelta(days=n) for n in (0, 3, 4, 5, 6)}
+        periods = [{"code": "159941", "date": day.isoformat(),
+                    "start": "09:30", "resume": "10:30"} for day in sorted(dates)]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "halts.json"
+            path.write_text(json.dumps(periods))
+            halts = load_halts(path)["159941"]
+
+        def prices(code, period, padding=False):
+            if period == 101:
+                return fixture(code, period)
+            rows = []
+            current = list(active_minutes(DAY))
+            for row in fixture(code, period)[:-3]:
+                ts = datetime.fromisoformat(row.split(",", 1)[0]).replace(tzinfo=CST)
+                if ts not in halts:
+                    rows.append(row)
+                elif padding:
+                    rows.append(f"{ts:%Y-%m-%d %H:%M},8,8,8,8,0")
+            rows.extend([f"{current[4]:%Y-%m-%d %H:%M},1.02,1.02,1.03,0.99,100",
+                         f"{current[5]:%Y-%m-%d %H:%M},1.04,1.04,1.05,1.03,100"])
+            return rows
+
+        def at(hour, minute):
+            return datetime.combine(DAY, time(hour, minute), CST)
+
+        def run(slot, provider=prices, confirmed=halts):
+            return safe_eval("159941", slot, provider, "buy", True, True, confirmed)
+
+        self.assertEqual(run(at(10, 30))["signal"], "halted")
+        self.assertEqual(run(at(10, 45))["signal"], "watch")
+        resumed = run(at(11, 0))
+        self.assertEqual(resumed["signal"], "pullback_confirmed")
+        self.assertEqual(resumed, run(at(11, 0), lambda code, period: prices(code, period, padding=True)))
+        self.assertEqual(run(at(11, 0), confirmed=None)["signal"], "data_unavailable")
+
+        def lower_open(code, period):
+            rows = prices(code, period)
+            if period == 15:
+                rows[-2] = rows[-2].split(",", 1)[0] + ",0.95,0.95,0.96,0.94,100"
+            return rows
+
+        self.assertEqual(run(at(10, 45), lower_open)["signal"], "watch")
+
+    def test_zero_volume_cannot_trigger_or_bridge_an_alert(self):
+        def padded(code, period, index):
+            rows = fixture(code, period)
+            if period == 15:
+                rows[index] = rows[index].split(",", 1)[0] + ",0,0,0,0,0"
+            return rows
+
+        def run(index):
+            return safe_eval("159941", completed_slot(NOW), lambda c, p: padded(c, p, index),
+                             "buy", True, True)["signal"]
+
+        self.assertEqual(run(-2), "no_trade_bar")
+        self.assertEqual(run(-3), "watch")
+
+    def test_single_symbol_quote_failure_and_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, hold, _ = self.sources(root)
+            state = root / "state.json"
+
+            def gapped(code, period):
+                rows = fixture(code, period)
+                if code == "159687" and period == 15:
+                    del rows[-12]
+                return rows
+
+            result = notify_once(scan(root, hold, NOW, gapped), state)
+            self.assertEqual(result["status"], "degraded")
+            self.assertEqual(result["signals"]["510300"]["signal"], "pullback_confirmed")
+            self.assertIn("prices:159687", result["problems"])
+            self.assertTrue(result["new_problem"])
+            self.assertFalse(notify_once(scan(root, hold, NOW, gapped), state)["new_problem"])
+            recovered = notify_once(scan(root, hold, NOW, fixture), state)
+            self.assertEqual(recovered["recovered_problems"], ["prices:159687"])
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(recovered["alerts"], [])
 
 
 if __name__ == "__main__":
