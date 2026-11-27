@@ -1,0 +1,9 @@
+{
+  "updated_at": "2026-11-27T17:40:00+08:00",
+  "note": "4%定投计划。base=首笔底仓价；第 i 档触发价 = base*(1-step)^(i-1)；收盘价 <= 该价 即触发。改完提交后，日更任务会自动读取。",
+  "targets": [
+    {"code": "159915", "name": "创业板ETF易方达", "index_code": "SZ399006", "metric": "PE", "base": 2.471, "total": 20000, "parts": 10, "step": 0.04, "bought_parts": 0, "note": "2026-11-27 收盘价作底仓参考；PE 1.7%分位（低估）"},
+    {"code": "512170", "name": "医疗ETF华宝", "index_code": "SZ399989", "metric": "PB", "base": 0.334, "total": 15000, "parts": 10, "step": 0.04, "bought_parts": 0, "note": "2026-11-27 收盘价作底仓参考；PB 3.4%分位（低估）"},
+    {"code": "513260", "name": "恒生科技ETF汇添富", "index_code": "HKHSTECH", "metric": "PB", "base": 0.8666, "total": 15000, "parts": 10, "step": 0.04, "bought_parts": 1, "note": "底仓=已持有 22100 股均价 0.8666；下一档 0.8319（PB 0.3%分位）"}
+  ]
+}
